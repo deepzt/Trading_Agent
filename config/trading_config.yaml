@@ -1,0 +1,80 @@
+# Trading System Configuration
+
+market:
+  timezone: "Asia/Kolkata"
+  open_time: "09:15"
+  close_time: "15:30"
+  pre_open_start: "09:00"
+  pre_open_end: "09:08"
+  intraday_exit_time: "15:15"   # Exit intraday before market close
+  eod_report_time: "15:45"
+  exchange: "NSE"
+
+strategies:
+  active:
+    - swing          # Always on
+    - positional     # Always on
+    - intraday       # Only during market hours
+    # - options      # Uncomment when F&O data is set up
+
+  intraday:
+    timeframe: "15m"
+    lookback_days: 5
+    breakout_buffer_pct: 0.002      # 0.2% above breakout level
+    volume_surge_multiplier: 1.5    # Volume must be 1.5x 20-period avg
+    min_price: 100                  # Skip penny stocks
+    max_price: 50000
+    exit_by: "15:15"
+
+  swing:
+    timeframe: "1d"
+    lookback_days: 90
+    ema_fast: 9
+    ema_slow: 21
+    ema_trend: 50
+    rsi_min: 40
+    rsi_max: 65
+    min_adx: 20                     # Trend strength filter
+
+  positional:
+    timeframe: "1wk"
+    lookback_days: 365
+    ema_trend: 200
+    rsi_min: 45
+    rsi_max: 70
+    min_holding_days: 15
+
+  options:
+    screener_timeframe: "1d"
+    pcr_threshold_bullish: 0.7      # PCR < 0.7 = bearish sentiment → contrarian buy
+    pcr_threshold_bearish: 1.3      # PCR > 1.3 = bullish sentiment → contrarian sell
+    min_oi_change_pct: 10           # Min OI change to flag a strike
+
+technical:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2
+  atr_period: 14
+  ema_periods: [9, 21, 50, 200]
+  volume_ma_period: 20
+
+signals:
+  min_confidence_for_claude: 6.0    # Only send to Claude if rules score >= 6/10
+  min_confidence_to_trade: 7.0      # Only paper trade if final score >= 7/10
+  max_signals_per_run: 10           # Cap signals generated per scan
+  cooldown_hours: 4                 # Don't re-signal same stock for 4 hrs
+
+data:
+  primary_source: "yfinance"        # "yfinance" or "jugaad"
+  fallback_source: "yfinance"
+  cache_ttl_minutes: 15             # Cache live quotes for 15 min
+  historical_cache_days: 7          # Refresh historical cache after 7 days
+
+claude:
+  model: "claude-sonnet-4-6"
+  max_tokens: 1024
+  temperature: 0                    # Deterministic for trading decisions
+  use_prompt_caching: true

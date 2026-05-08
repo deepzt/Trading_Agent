@@ -1,0 +1,45 @@
+# Risk Management Configuration
+
+account:
+  initial_capital: 100000           # INR — paper trading capital
+  currency: "INR"
+
+position_sizing:
+  method: "fixed_fractional"        # "fixed_fractional" or "kelly"
+  risk_per_trade_pct: 2.0           # Risk 2% of account per trade
+  kelly_fraction: 0.25              # Quarter Kelly (if using kelly method)
+  max_position_pct: 10.0            # Max 10% of account in a single stock
+  min_quantity: 1                   # Min shares to trade
+
+portfolio_limits:
+  max_open_positions: 5             # Max simultaneous trades
+  max_sector_exposure_pct: 30.0     # Max 30% in one sector
+  max_intraday_positions: 3         # Max intraday positions at once
+
+stop_loss:
+  atr_multiplier: 1.5               # SL = entry ± (1.5 × ATR)
+  max_loss_pct: 5.0                 # Hard max SL: 5% from entry
+  trailing_stop: true
+  trail_to_breakeven_after: "T1"    # Move SL to breakeven after T1 hit
+  trail_to_t1_after: "T2"           # Move SL to T1 after T2 hit
+
+targets:
+  t1_rr_ratio: 1.0                  # Target 1 at 1:1 risk-reward
+  t2_rr_ratio: 2.0                  # Target 2 at 1:2 risk-reward
+  t1_exit_pct: 50                   # Exit 50% of position at T1
+  t2_exit_pct: 50                   # Exit remaining 50% at T2
+
+daily_limits:
+  max_daily_loss_pct: 5.0           # Halt trading if day's P&L < -5%
+  max_daily_trades: 10              # Max paper trades per day
+  max_signals_per_hour: 5
+
+drawdown:
+  max_drawdown_pct: 15.0            # Halt trading if drawdown > 15%
+  drawdown_review_pct: 10.0         # Alert when drawdown exceeds 10%
+
+compliance:
+  sebi_algo_registered: false       # Set true once SEBI registration done
+  paper_trading_only: true          # Override: always paper trade
+  audit_log: true                   # Log every signal + decision
+  kill_switch_env: "TRADING_ENABLED"

@@ -1,0 +1,74 @@
+# NSE Watchlist — Nifty 50 + select Midcap stocks
+# Symbols use NSE format (append .NS for yfinance)
+
+nifty50:
+  - RELIANCE
+  - TCS
+  - HDFCBANK
+  - INFY
+  - ICICIBANK
+  - HINDUNILVR
+  - ITC
+  - SBIN
+  - BHARTIARTL
+  - KOTAKBANK
+  - LT
+  - AXISBANK
+  - ASIANPAINT
+  - MARUTI
+  - SUNPHARMA
+  - TITAN
+  - BAJFINANCE
+  - WIPRO
+  - ULTRACEMCO
+  - HCLTECH
+  - TATAMOTORS
+  - ONGC
+  - POWERGRID
+  - NTPC
+  - JSWSTEEL
+  - TATASTEEL
+  - TECHM
+  - INDUSINDBK
+  - COALINDIA
+  - ADANIENT
+  - ADANIPORTS
+  - BAJAJFINSV
+  - DIVISLAB
+  - DRREDDY
+  - EICHERMOT
+  - GRASIM
+  - HEROMOTOCO
+  - HINDALCO
+  - M&M
+  - CIPLA
+  - BRITANNIA
+  - SBILIFE
+  - HDFCLIFE
+  - APOLLOHOSP
+  - TATACONSUM
+  - BPCL
+  - NESTLEIND
+  - UPL
+  - LTIM
+  - BAJAJ-AUTO
+
+midcap_focus:
+  - VOLTAS
+  - MUTHOOTFIN
+  - PERSISTENT
+  - COFORGE
+  - TRENT
+  - GODREJCP
+  - PIDILITIND
+  - BERGEPAINT
+  - PAGEIND
+  - HAVELLS
+
+indices:
+  - NIFTY 50
+  - NIFTY BANK
+  - NIFTY IT
+  - NIFTY PHARMA
+  - NIFTY FMCG
+  - INDIA VIX
