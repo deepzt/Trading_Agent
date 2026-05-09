@@ -21,6 +21,7 @@ from agents.risk_agent import RiskAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.signal_agent import SignalAgent
 from agents.technical_analysis_agent import TechnicalAnalysisAgent
+from agents.tradingview_ta_agent import TradingViewTAAgent
 from brokers.paper_broker import PaperBroker
 from monitoring.health import is_market_open, is_trading_day
 from monitoring.logger import get_logger
@@ -39,6 +40,7 @@ class TradingState(TypedDict):
     validated_signals: List[Any]
     approved_trades: List[Any]
     sentiment: Dict[str, Any]
+    tv_ratings: Dict[str, str]
     portfolio_stats: Dict[str, Any]
     closed_today: List[Any]
     errors: List[str]
@@ -69,17 +71,27 @@ def fetch_sentiment(state: TradingState) -> TradingState:
     return state
 
 
+def fetch_tv_ratings(state: TradingState) -> TradingState:
+    _logger.info("Step 3b: Fetching TradingView TA ratings")
+    agent = TradingViewTAAgent()
+    symbols = list(state["enriched_data"].keys())[:20]
+    state["tv_ratings"] = agent.run(symbols)
+    return state
+
+
 def generate_signals(state: TradingState) -> TradingState:
     _logger.info("Step 4: Generating signals")
     agent = SignalAgent()
-    state["signals"] = agent.run(state["enriched_data"])
+    state["signals"] = agent.run(state["enriched_data"], tv_ratings=state.get("tv_ratings", {}))
     return state
 
 
 def validate_with_claude(state: TradingState) -> TradingState:
     _logger.info("Step 5: Claude signal validation")
     agent = ClaudeValidationAgent()
-    state["validated_signals"] = agent.run(state["signals"], state["sentiment"])
+    state["validated_signals"] = agent.run(
+        state["signals"], state["sentiment"], state.get("tv_ratings", {})
+    )
     return state
 
 
@@ -137,6 +149,7 @@ def build_graph() -> Any:
     workflow.add_node("fetch_data", fetch_data)
     workflow.add_node("run_ta", run_technical_analysis)
     workflow.add_node("fetch_sentiment", fetch_sentiment)
+    workflow.add_node("fetch_tv_ratings", fetch_tv_ratings)
     workflow.add_node("generate_signals", generate_signals)
     workflow.add_node("validate_claude", validate_with_claude)
     workflow.add_node("check_risk", check_risk)
@@ -146,7 +159,8 @@ def build_graph() -> Any:
     workflow.add_edge(START, "fetch_data")
     workflow.add_edge("fetch_data", "run_ta")
     workflow.add_edge("run_ta", "fetch_sentiment")
-    workflow.add_edge("fetch_sentiment", "generate_signals")
+    workflow.add_edge("fetch_sentiment", "fetch_tv_ratings")
+    workflow.add_edge("fetch_tv_ratings", "generate_signals")
     workflow.add_edge("generate_signals", "validate_claude")
     workflow.add_edge("validate_claude", "check_risk")
     workflow.add_edge("check_risk", "execute_trades")
@@ -210,7 +224,7 @@ class TradingScheduler:
             "symbols": self._symbols,
             "raw_data": {}, "enriched_data": {},
             "signals": [], "validated_signals": [],
-            "approved_trades": [], "sentiment": {},
+            "approved_trades": [], "sentiment": {}, "tv_ratings": {},
             "portfolio_stats": {}, "closed_today": [], "errors": [],
         }
         try:

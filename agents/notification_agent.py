@@ -20,7 +20,8 @@ class NotificationAgent(BaseAgent):
     def __init__(self):
         super().__init__("NotificationAgent")
         self._bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self._chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        raw_ids = os.getenv("TELEGRAM_CHAT_ID", "")
+        self._chat_ids = [cid.strip() for cid in raw_ids.split(",") if cid.strip()]
         self._email_sender = os.getenv("EMAIL_SENDER", "")
         self._email_password = os.getenv("EMAIL_PASSWORD", "")
         self._email_recipient = os.getenv("EMAIL_RECIPIENT", "")
@@ -38,7 +39,7 @@ class NotificationAgent(BaseAgent):
         msg = self._format_signal_message(signal, quantity)
         sent = False
 
-        if self._bot_token and self._chat_id:
+        if self._bot_token and self._chat_ids:
             sent = self._send_telegram(msg)
 
         if not sent:
@@ -100,7 +101,7 @@ class NotificationAgent(BaseAgent):
 
         verdict_line = ""
         if signal.claude_verdict == "APPROVE" and signal.claude_reasoning:
-            verdict_line = f"\n🤖 *Claude*: {signal.claude_reasoning[:200]}"
+            verdict_line = f"\n🤖 *AI*: {signal.claude_reasoning}"
 
         return (
             f"{emoji} *{signal.signal_type} Signal: {signal.symbol}*\n"
@@ -117,22 +118,24 @@ class NotificationAgent(BaseAgent):
         )
 
     def _send_telegram(self, text: str) -> bool:
-        if not self._bot_token or not self._chat_id:
+        if not self._bot_token or not self._chat_ids:
             self.log_warning("Telegram not configured — check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
             return False
-        try:
-            import requests
-            url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
-            resp = requests.post(url, json={
-                "chat_id": self._chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-            }, timeout=10)
-            resp.raise_for_status()
-            return True
-        except Exception as e:
-            self.log_error(f"Telegram send failed: {e}")
-            return False
+        import requests
+        url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
+        success = False
+        for chat_id in self._chat_ids:
+            try:
+                resp = requests.post(url, json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                }, timeout=10)
+                resp.raise_for_status()
+                success = True
+            except Exception as e:
+                self.log_error(f"Telegram send failed for {chat_id}: {e}")
+        return success
 
     def _send_email(self, subject: str, body: str) -> bool:
         if not self._email_sender or not self._email_password:

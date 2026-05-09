@@ -73,8 +73,16 @@ data:
   cache_ttl_minutes: 15             # Cache live quotes for 15 min
   historical_cache_days: 7          # Refresh historical cache after 7 days
 
+validation:
+  provider: "auto"                  # "anthropic", "openai", or "auto" (uses whichever key is available)
+
 claude:
   model: "claude-sonnet-4-6"
   max_tokens: 1024
   temperature: 0                    # Deterministic for trading decisions
   use_prompt_caching: true
+
+openai:
+  model: "gpt-4o"
+  max_tokens: 1024
+  temperature: 0

@@ -1,7 +1,7 @@
 """
-Validates trading signals using Claude API (claude-sonnet-4-6).
-Uses prompt caching for the system prompt to reduce API costs.
-Only signals with rules confidence >= 6.0 are sent for validation.
+Validates trading signals using an AI model (Anthropic Claude or OpenAI GPT).
+Provider is selected via config (validation.provider) or auto-detected from env keys.
+Priority: Anthropic > OpenAI. Signals are REJECTED if no provider is available.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import json
 import os
 from typing import List, Optional
 
-import anthropic
 import yaml
 from pathlib import Path
 
@@ -40,11 +39,28 @@ Response format:
 
 Guidelines:
 - APPROVE: Signal aligns with market context, risk is acceptable
-- REJECT: Signal has flaws Claude detects that rules missed (bad news, overbought sector, macro risk)
+- REJECT: Signal has flaws the rules engine missed (bad news, overbought sector, macro risk)
 - MODIFY: Signal is good but stop-loss or target should be adjusted
 - Be decisive — avoid wishy-washy reasoning
 - Consider Nifty 50 trend when evaluating individual stocks
 - Flag if stock has upcoming earnings / results / board meeting that adds risk"""
+
+
+def _resolve_provider(preferred: str) -> str:
+    """Return the provider to actually use based on config + available env keys."""
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+
+    if preferred == "anthropic":
+        return "anthropic" if has_anthropic else "none"
+    if preferred == "openai":
+        return "openai" if has_openai else "none"
+    # auto: Anthropic first, OpenAI fallback
+    if has_anthropic:
+        return "anthropic"
+    if has_openai:
+        return "openai"
+    return "none"
 
 
 class ClaudeValidationAgent(BaseAgent):
@@ -53,14 +69,39 @@ class ClaudeValidationAgent(BaseAgent):
         cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
-        self._model = cfg["claude"]["model"]
-        self._max_tokens = cfg["claude"]["max_tokens"]
-        self._min_confidence = cfg["signals"]["min_confidence_for_claude"]
-        self._client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=30.0)
 
-    def run(self, signals: List[Signal], sentiment_context: Optional[dict] = None) -> List[Signal]:
-        """Validate signals via Claude. Returns signals with updated status and confidence."""
+        self._min_confidence = cfg["signals"]["min_confidence_for_claude"]
+        self._max_tokens = cfg["claude"]["max_tokens"]
+
+        preferred = cfg.get("validation", {}).get("provider", "auto")
+        self._provider = _resolve_provider(preferred)
+
+        if self._provider == "anthropic":
+            import anthropic as _anthropic
+            self._model = cfg["claude"]["model"]
+            self._client = _anthropic.Anthropic(
+                api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=30.0
+            )
+            self.log_info("Validation provider: Anthropic Claude")
+
+        elif self._provider == "openai":
+            import openai as _openai
+            self._model = cfg["openai"]["model"]
+            self._client = _openai.OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"), timeout=30.0
+            )
+            self.log_info("Validation provider: OpenAI GPT")
+
+        else:
+            self._model = None
+            self._client = None
+            self.log_warning("No AI API key found — all signals will be REJECTED")
+
+    def run(self, signals: List[Signal], sentiment_context: Optional[dict] = None,
+            tv_ratings: Optional[dict] = None) -> List[Signal]:
+        """Validate signals via AI provider. Returns signals with updated status and confidence."""
         validated = []
+        tv = tv_ratings or {}
         for signal in signals:
             if signal.confidence < self._min_confidence:
                 signal.status = "REJECTED"
@@ -69,7 +110,7 @@ class ClaudeValidationAgent(BaseAgent):
                 validated.append(signal)
                 continue
 
-            result = self._validate_signal(signal, sentiment_context or {})
+            result = self._validate_signal(signal, sentiment_context or {}, tv)
             if result:
                 signal.claude_verdict = result.get("verdict", "REJECT")
                 signal.claude_reasoning = result.get("reasoning", "")
@@ -83,48 +124,68 @@ class ClaudeValidationAgent(BaseAgent):
 
                 signal.status = "APPROVED" if signal.claude_verdict == "APPROVE" else "REJECTED"
             else:
-                # API failure — fail safe: do not trade unvalidated signals
                 signal.claude_verdict = "SKIP"
-                signal.claude_reasoning = "Claude API unavailable — signal held for safety"
+                signal.claude_reasoning = "AI API unavailable — signal held for safety"
                 signal.status = "REJECTED"
 
             validated.append(signal)
             self.log_info(
-                f"{signal.symbol}: Claude={signal.claude_verdict} conf={signal.confidence}",
+                f"{signal.symbol}: verdict={signal.claude_verdict} conf={signal.confidence}",
                 symbol=signal.symbol
             )
 
         approved = sum(1 for s in validated if s.status == "APPROVED")
-        self.log_info(f"Claude validated {len(validated)} signals: {approved} approved")
+        self.log_info(f"Validated {len(validated)} signals via {self._provider}: {approved} approved")
         return validated
 
-    def _validate_signal(self, signal: Signal, sentiment: dict) -> Optional[dict]:
-        news_context = ""
+    def _validate_signal(self, signal: Signal, sentiment: dict, tv_ratings: dict) -> Optional[dict]:
+        if self._provider == "none" or self._client is None:
+            return None
+
+        user_message = self._build_prompt(signal, sentiment, tv_ratings)
+
+        if self._provider == "anthropic":
+            return self._call_anthropic(signal.symbol, user_message)
+        return self._call_openai(signal.symbol, user_message)
+
+    def _build_prompt(self, signal: Signal, sentiment: dict, tv_ratings: dict) -> str:
         sym_sentiment = sentiment.get(signal.symbol, {})
+        news_context = ""
         if sym_sentiment:
-            news_context = f"\nRecent news sentiment for {signal.symbol}: {sym_sentiment.get('sentiment', 'NEUTRAL')} — {sym_sentiment.get('headline', '')}"
+            news_context = (
+                f"\nRecent news sentiment for {signal.symbol}: "
+                f"{sym_sentiment.get('sentiment', 'NEUTRAL')} — {sym_sentiment.get('headline', '')}"
+            )
 
         market_context = sentiment.get("_market", {})
         market_note = ""
         if market_context:
-            market_note = f"\nNifty 50 trend: {market_context.get('trend', 'neutral')} | India VIX: {market_context.get('vix', 'unknown')}"
+            market_note = (
+                f"\nNifty 50 trend: {market_context.get('trend', 'neutral')} "
+                f"| India VIX: {market_context.get('vix', 'unknown')}"
+            )
 
-        user_message = f"""Validate this trading signal:
+        tv_rating = tv_ratings.get(signal.symbol, "UNKNOWN")
+        tv_note = f"\nTradingView independent TA rating (daily): {tv_rating}" if tv_rating != "UNKNOWN" else ""
 
-Symbol: {signal.symbol}
-Type: {signal.signal_type}
-Strategy: {signal.strategy} ({signal.timeframe})
-Entry: ₹{signal.entry_price}
-Stop Loss: ₹{signal.stop_loss} ({signal.sl_pct}% risk)
-Target 1: ₹{signal.target_1}
-Target 2: ₹{signal.target_2}
-Risk-Reward: {signal.risk_reward}x
-Rules Confidence: {signal.confidence}/10
-Signal Reasons: {', '.join(signal.reasons)}
-{market_note}{news_context}
+        return (
+            f"Validate this trading signal:\n\n"
+            f"Symbol: {signal.symbol}\n"
+            f"Type: {signal.signal_type}\n"
+            f"Strategy: {signal.strategy} ({signal.timeframe})\n"
+            f"Entry: ₹{signal.entry_price}\n"
+            f"Stop Loss: ₹{signal.stop_loss} ({signal.sl_pct}% risk)\n"
+            f"Target 1: ₹{signal.target_1}\n"
+            f"Target 2: ₹{signal.target_2}\n"
+            f"Risk-Reward: {signal.risk_reward}x\n"
+            f"Rules Confidence: {signal.confidence}/10\n"
+            f"Signal Reasons: {', '.join(signal.reasons)}"
+            f"{market_note}{news_context}{tv_note}\n\n"
+            f"Respond with JSON only."
+        )
 
-Respond with JSON only."""
-
+    def _call_anthropic(self, symbol: str, user_message: str) -> Optional[dict]:
+        import anthropic as _anthropic
         try:
             response = self._client.messages.create(
                 model=self._model,
@@ -133,19 +194,42 @@ Respond with JSON only."""
                     {
                         "type": "text",
                         "text": _SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},  # Prompt caching
+                        "cache_control": {"type": "ephemeral"},
                     }
                 ],
                 messages=[{"role": "user", "content": user_message}],
             )
-            raw = response.content[0].text.strip()
-            return json.loads(raw)
+            return json.loads(response.content[0].text.strip())
         except json.JSONDecodeError:
-            self.log_error(f"Claude returned invalid JSON for {signal.symbol}")
+            self.log_error(f"Anthropic returned invalid JSON for {symbol}")
             return None
-        except anthropic.APIError as e:
-            self.log_error(f"Claude API error for {signal.symbol}: {e}")
+        except _anthropic.APIError as e:
+            self.log_error(f"Anthropic API error for {symbol}: {e}")
             return None
         except Exception as e:
-            self.log_error(f"Unexpected error for {signal.symbol}: {e}")
+            self.log_error(f"Unexpected Anthropic error for {symbol}: {e}")
+            return None
+
+    def _call_openai(self, symbol: str, user_message: str) -> Optional[dict]:
+        import openai as _openai
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+            return json.loads(response.choices[0].message.content.strip())
+        except json.JSONDecodeError:
+            self.log_error(f"OpenAI returned invalid JSON for {symbol}")
+            return None
+        except _openai.APIError as e:
+            self.log_error(f"OpenAI API error for {symbol}: {e}")
+            return None
+        except Exception as e:
+            self.log_error(f"Unexpected OpenAI error for {symbol}: {e}")
             return None

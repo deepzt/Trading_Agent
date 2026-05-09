@@ -6,6 +6,7 @@ pytz==2024.1
 
 # ─── Anthropic / LangGraph ─────────────────────────────────────
 anthropic>=0.28.0
+openai>=1.30.0
 langgraph>=0.1.19
 langchain-core>=0.2.22,<0.3
 langchain-anthropic>=0.1.19
@@ -21,6 +22,7 @@ pandas==2.2.2
 numpy==1.26.4
 ta==0.11.0
 scipy==1.13.0
+tradingview-ta>=3.3.0
 
 # ─── Backtesting ───────────────────────────────────────────────
 vectorbt==0.26.1
@@ -38,7 +40,7 @@ plotly==5.22.0
 streamlit-autorefresh==1.0.1
 
 # ─── Notifications ─────────────────────────────────────────────
-python-telegram-bot==21.3
+python-telegram-bot==13.15
 
 # ─── Async / HTTP ──────────────────────────────────────────────
 aiohttp==3.9.5

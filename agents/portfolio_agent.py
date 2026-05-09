@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS signals_log (
     claude_verdict TEXT,
     claude_reasoning TEXT,
     timestamp TEXT,
-    status TEXT
+    status TEXT,
+    tv_rating TEXT
 );
 """
 
@@ -70,6 +71,11 @@ class PortfolioAgent(BaseAgent):
                 stmt = stmt.strip()
                 if stmt:
                     conn.execute(text(stmt))
+            # Migrate existing DB: add tv_rating column if absent
+            try:
+                conn.execute(text("ALTER TABLE signals_log ADD COLUMN tv_rating TEXT"))
+            except Exception:
+                pass  # Column already exists
             conn.commit()
 
     # ── Position management ────────────────────────────────────────────────
@@ -198,8 +204,8 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("""
                 INSERT OR REPLACE INTO signals_log
                     (id, symbol, strategy, signal_type, confidence, claude_verdict,
-                     claude_reasoning, timestamp, status)
-                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st)
+                     claude_reasoning, timestamp, status, tv_rating)
+                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :tvr)
             """), {
                 "id": signal_dict.get("id"),
                 "sym": signal_dict.get("symbol"),
@@ -210,5 +216,6 @@ class PortfolioAgent(BaseAgent):
                 "cr": signal_dict.get("claude_reasoning"),
                 "ts": signal_dict.get("timestamp"),
                 "st": signal_dict.get("status"),
+                "tvr": signal_dict.get("tv_rating", "UNKNOWN"),
             })
             conn.commit()

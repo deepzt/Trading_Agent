@@ -343,14 +343,21 @@ def render_signal_card(sig: dict):
     t2 = sig.get("target_2", 0)
     reasoning = sig.get("claude_reasoning") or ""
 
+    tv_rating = sig.get("tv_rating") or ""
+    _tv_colors = {"STRONG_BUY": "#3fb950", "BUY": "#58c94b", "SELL": "#f85149", "STRONG_SELL": "#da3633", "NEUTRAL": "#8b949e"}
+    tv_color = _tv_colors.get(tv_rating, "")
+    tv_badge = (
+        f'<span style="background:{tv_color}22; color:{tv_color}; border:1px solid {tv_color}; '
+        f'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">TV: {tv_rating}</span>'
+        if tv_rating and tv_rating not in ("UNKNOWN", "") else ""
+    )
+
     st.markdown(f"""
     <div class="{cls}">
         <div style="display:flex; justify-content:space-between; align-items:start;">
             <div>
                 <span class="signal-symbol">{'🟢' if is_buy else '🔴'} {sig.get('symbol','')}</span>
-                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">
-                    {sig.get('strategy','').title()} · {sig.get('timeframe','')}
-                </span>
+                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{tv_badge}
             </div>
             <span style="color:#8b949e; font-size:0.72rem;">{str(sig.get('timestamp',''))[:19]}</span>
         </div>
@@ -364,7 +371,7 @@ def render_signal_card(sig: dict):
             <span style="color:#8b949e; font-size:0.72rem;">{verdict_badge} &nbsp;·&nbsp; Confidence {conf}/10</span>
         </div>
         <div class="conf-bar-bg"><div class="conf-bar-fill" style="width:{conf_pct}%; background:{bar_color};"></div></div>
-        {f'<div style="color:#8b949e; font-size:0.72rem; margin-top:6px; font-style:italic;">🤖 {reasoning[:200]}</div>' if reasoning else ''}
+        {f'<div style="color:#8b949e; font-size:0.72rem; margin-top:6px; font-style:italic; line-height:1.5;">🤖 {reasoning}</div>' if reasoning else ''}
     </div>""", unsafe_allow_html=True)
 
 
@@ -800,18 +807,18 @@ with tabs[1]:
     drawdown = stats["max_drawdown_pct"]
 
     c1.metric("Portfolio Equity", f"₹{stats['current_equity']:,.0f}",
-              f"₹{total_pnl:+,.0f} total",
-              delta_color="normal" if total_pnl >= 0 else "inverse")
+              f"{total_pnl:+,.0f}",
+              delta_color="normal")
     c2.metric("Today's P&L", f"₹{daily_pnl:+,.0f}",
-              f"{daily['daily_pnl_pct']:+.2f}%",
-              delta_color="normal" if daily_pnl >= 0 else "inverse")
+              f"{daily['daily_pnl_pct']:+.2f}",
+              delta_color="normal")
     c3.metric("Win Rate", f"{stats['win_rate']}%",
               f"{stats['total_trades']} trades",
               delta_color="off")
     sharpe_label = "Excellent" if sharpe > 1.5 else ("Good" if sharpe > 1 else ("Low" if sharpe >= 0 else "Negative"))
     c4.metric("Sharpe Ratio", f"{sharpe:.2f}",
               sharpe_label,
-              delta_color="normal" if sharpe > 1 else "inverse")
+              delta_color="normal" if sharpe >= 0 else "inverse")
     c5.metric("Max Drawdown", f"{drawdown:.2f}%",
               delta_color="off")
     c6.metric("Avg Win / Loss", f"₹{stats['avg_win']:,.0f} / ₹{stats['avg_loss']:,.0f}",
@@ -1202,18 +1209,34 @@ with tabs[6]:
     c1.metric("Trading", "Enabled" if trading_on else "DISABLED")
     c2.metric("Mode", "Paper" if paper else "🔴 LIVE")
     c3.metric("Account Size", f"₹{account:,.0f}")
-    c4.metric("Claude Model", "Configured" if os.getenv("ANTHROPIC_API_KEY") else "Not set")
+    _ai_provider = "Anthropic" if os.getenv("ANTHROPIC_API_KEY") else ("OpenAI" if os.getenv("OPENAI_API_KEY") else "None")
+    c4.metric("AI Validator", _ai_provider)
 
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown("#### API Keys")
         for key, label in [("ANTHROPIC_API_KEY", "Anthropic API"),
+                           ("OPENAI_API_KEY", "OpenAI API"),
                            ("TELEGRAM_BOT_TOKEN", "Telegram Bot"),
                            ("TELEGRAM_CHAT_ID", "Telegram Chat ID")]:
             val = os.getenv(key, "")
             status = "✅ Configured" if val else "❌ Not configured"
             st.markdown(f"<div class='info-box'><span style='color:#8b949e; font-size:0.75rem;'>{label}</span><br>{status}</div>",
                         unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("#### Test Notifications")
+    if st.button("📨 Send Test Telegram Alert"):
+        from agents.notification_agent import NotificationAgent
+        try:
+            notif = NotificationAgent()
+            ok = notif.send_alert("✅ Trading system test alert — Telegram is working!")
+            if ok:
+                st.success("Test alert sent! Check your Telegram.")
+            else:
+                st.warning("Not sent — check that TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set in .env, then restart the dashboard.")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
     with col_b:
         st.markdown("#### Risk Config")

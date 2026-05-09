@@ -19,6 +19,11 @@ from agents.base_agent import BaseAgent
 
 _IST = pytz.timezone("Asia/Kolkata")
 
+_TV_ADJ: Dict[str, float] = {
+    "STRONG_BUY": 1.5, "BUY": 1.0, "NEUTRAL": 0.0,
+    "SELL": -1.0, "STRONG_SELL": -1.5,
+}
+
 
 def _now_ist() -> str:
     return datetime.now(_IST).isoformat()
@@ -46,6 +51,7 @@ class Signal:
         self.status = "PENDING"              # PENDING → APPROVED / REJECTED / EXECUTED
         self.claude_verdict = None
         self.claude_reasoning = None
+        self.tv_rating: str = "UNKNOWN"
 
         # Computed
         sl_dist = abs(entry_price - stop_loss)
@@ -72,6 +78,7 @@ class Signal:
             "status": self.status,
             "claude_verdict": self.claude_verdict,
             "claude_reasoning": self.claude_reasoning,
+            "tv_rating": self.tv_rating,
         }
 
     def format_alert(self) -> str:
@@ -96,17 +103,19 @@ class SignalAgent(BaseAgent):
         with open(risk_path) as f:
             self._risk = yaml.safe_load(f)
 
-    def run(self, enriched_data: Dict[str, pd.DataFrame], active_strategies: Optional[List[str]] = None) -> List[Signal]:
+    def run(self, enriched_data: Dict[str, pd.DataFrame], active_strategies: Optional[List[str]] = None,
+            tv_ratings: Optional[Dict[str, str]] = None) -> List[Signal]:
         """Screen all symbols and return list of signals above confidence threshold."""
         if active_strategies is None:
             active_strategies = self._cfg["strategies"]["active"]
+        tv = tv_ratings or {}
 
         signals: List[Signal] = []
         for symbol, df in enriched_data.items():
             if df is None or len(df) < 50:
                 continue
             for strategy in active_strategies:
-                sig = self._screen(symbol, df, strategy)
+                sig = self._screen(symbol, df, strategy, tv)
                 if sig:
                     signals.append(sig)
 
@@ -118,21 +127,21 @@ class SignalAgent(BaseAgent):
         self.log_info(f"Generated {len(signals)} signals from {len(enriched_data)} symbols")
         return signals
 
-    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str) -> Optional[Signal]:
+    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str, tv_ratings: dict) -> Optional[Signal]:
         try:
             if strategy == "swing":
-                return self._swing_signal(symbol, df)
+                return self._swing_signal(symbol, df, tv_ratings)
             elif strategy == "intraday":
-                return self._intraday_signal(symbol, df)
+                return self._intraday_signal(symbol, df, tv_ratings)
             elif strategy == "positional":
-                return self._positional_signal(symbol, df)
+                return self._positional_signal(symbol, df, tv_ratings)
         except Exception as e:
             self.log_error(f"Signal error {symbol}/{strategy}: {e}")
         return None
 
     # ── Strategy screeners ─────────────────────────────────────────────────
 
-    def _swing_signal(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+    def _swing_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
         """EMA 9/21 crossover + RSI in sweet spot + above EMA50."""
         cfg = self._cfg["strategies"]["swing"]
         row = df.iloc[-1]
@@ -184,6 +193,12 @@ class SignalAgent(BaseAgent):
             score += 0.5
             reasons.append("Above 200 EMA")
 
+        # 7. TradingView independent cross-validation
+        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
+        score += _TV_ADJ.get(tv_rating, 0.0)
+        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"TradingView: {tv_rating}")
+
         if score < 5.0 or not reasons:
             return None
 
@@ -195,14 +210,16 @@ class SignalAgent(BaseAgent):
         target_1 = entry + sl_dist * self._risk["targets"]["t1_rr_ratio"]
         target_2 = entry + sl_dist * self._risk["targets"]["t2_rr_ratio"]
 
-        return Signal(
+        sig = Signal(
             symbol=symbol, signal_type="BUY", strategy="swing",
             entry_price=entry, stop_loss=stop_loss,
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="1d"
         )
+        sig.tv_rating = tv_rating
+        return sig
 
-    def _intraday_signal(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+    def _intraday_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
         """Breakout above previous day's high with volume surge."""
         cfg = self._cfg["strategies"]["intraday"]
         if len(df) < 5:
@@ -249,6 +266,12 @@ class SignalAgent(BaseAgent):
             score += 1.0
             reasons.append("EMA aligned bullish")
 
+        # 6. TradingView independent cross-validation
+        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
+        score += _TV_ADJ.get(tv_rating, 0.0)
+        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"TradingView: {tv_rating}")
+
         entry = close
         atr = row.get("ATRr_14", entry * 0.015)
         sl_dist = max(atr * 1.0, (entry - float(row["low"])) * 1.1)
@@ -257,14 +280,16 @@ class SignalAgent(BaseAgent):
         target_1 = entry + sl_dist * 1.0
         target_2 = entry + sl_dist * 2.0
 
-        return Signal(
+        sig = Signal(
             symbol=symbol, signal_type="BUY", strategy="intraday",
             entry_price=entry, stop_loss=stop_loss,
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="15m"
         )
+        sig.tv_rating = tv_rating
+        return sig
 
-    def _positional_signal(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+    def _positional_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
         """Weekly trend following — price above 200 EMA, strong momentum."""
         cfg = self._cfg["strategies"]["positional"]
         if len(df) < 200:
@@ -310,6 +335,12 @@ class SignalAgent(BaseAgent):
             score += 1.0
             reasons.append(f"ADX {adx:.0f}")
 
+        # 6. TradingView independent cross-validation
+        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
+        score += _TV_ADJ.get(tv_rating, 0.0)
+        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"TradingView: {tv_rating}")
+
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.025)
         sl_dist = atr * 2.0  # Wider stop for positional
@@ -318,9 +349,11 @@ class SignalAgent(BaseAgent):
         target_1 = entry + sl_dist * 1.5
         target_2 = entry + sl_dist * 3.0
 
-        return Signal(
+        sig = Signal(
             symbol=symbol, signal_type="BUY", strategy="positional",
             entry_price=entry, stop_loss=stop_loss,
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="1wk"
         )
+        sig.tv_rating = tv_rating
+        return sig
