@@ -11,12 +11,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import contextlib
+import io
+import logging
+import time
+
 import pandas as pd
 import pytz
 import yaml
 import yfinance as yf
 
 from agents.base_agent import BaseAgent
+
+# Suppress yfinance's own logging and stderr prints — we log our own clean messages
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -99,20 +107,27 @@ class DataAgent(BaseAgent):
     # ── Private helpers ────────────────────────────────────────────────────
 
     def _fetch_yfinance(self, symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
-        try:
-            interval = _TIMEFRAME_MAP.get(timeframe, "1d")
-            end = datetime.now()
-            start = end - timedelta(days=days)
-            ticker = yf.Ticker(_yf_symbol(symbol))
-            df = ticker.history(start=start, end=end, interval=interval, auto_adjust=True)
-            if df.empty:
-                return None
-            df.index = pd.to_datetime(df.index)
-            df.columns = [c.lower() for c in df.columns]
-            return df[["open", "high", "low", "close", "volume"]]
-        except Exception as e:
-            self.log_error(f"yfinance error for {symbol}: {e}")
-            return None
+        interval = _TIMEFRAME_MAP.get(timeframe, "1d")
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        ticker = yf.Ticker(_yf_symbol(symbol))
+
+        for attempt in range(2):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    df = ticker.history(start=start, end=end, interval=interval, auto_adjust=True)
+                if df is not None and not df.empty:
+                    df.index = pd.to_datetime(df.index)
+                    df.columns = [c.lower() for c in df.columns]
+                    return df[["open", "high", "low", "close", "volume"]]
+                if attempt == 0:
+                    time.sleep(1.5)
+            except Exception as e:
+                if attempt == 1:
+                    self.log_error(f"yfinance fetch failed for {symbol}: {e}")
+
+        self.log_warning(f"{symbol}: no data returned — skipped for this scan")
+        return None
 
 
     def _normalize_ohlcv(self, df: pd.DataFrame) -> pd.DataFrame:
