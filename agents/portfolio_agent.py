@@ -181,7 +181,9 @@ class PortfolioAgent(BaseAgent):
         max_drawdown = drawdown.min()
 
         # Sharpe (annualized per day, not per trade)
-        df_sorted["exit_date"] = pd.to_datetime(df_sorted["exit_time"]).dt.date
+        df_sorted["exit_date"] = df_sorted["exit_time"].apply(
+            lambda x: datetime.fromisoformat(x).date() if isinstance(x, str) and x else None
+        )
         daily_pnl_series = df_sorted.groupby("exit_date")["pnl"].sum() / initial_capital
         sharpe = 0.0
         if len(daily_pnl_series) > 5 and daily_pnl_series.std() > 0:

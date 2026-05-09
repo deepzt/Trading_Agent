@@ -1,17 +1,20 @@
 """
 Trading Agent — Entry Point
 Usage:
-  python main.py                    # Start full scheduled trading system
-  python main.py --scan             # Run one signal scan immediately
-  python main.py --dashboard        # Launch Streamlit dashboard
+  python main.py                    # Start dashboard + scheduler together (recommended)
+  python main.py --headless         # Scheduler only, no dashboard (server/background use)
+  python main.py --scan             # Run one signal scan immediately and exit
+  python main.py --dashboard        # Dashboard only, no scheduler
   python main.py --backtest SYMBOL  # Backtest a symbol (all strategies)
   python main.py --portfolio        # Show portfolio stats
+  python main.py --review "feature" # Architecture review for a proposed feature
 """
 
 import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -99,7 +102,19 @@ def show_portfolio():
         console.print(pos_table)
 
 
-def run_scheduler():
+def run_architecture_review(feature_request: str):
+    from agents.architecture_review_agent import ArchitectureReviewAgent
+
+    agent = ArchitectureReviewAgent()
+    review = agent.run(feature_request)
+    if review:
+        agent.print_review(review)
+    else:
+        _logger.error("Architecture review failed — check AI API key configuration")
+
+
+def _start_scheduler_thread() -> "TradingScheduler":
+    """Start the trading scheduler in a background daemon thread. Returns the scheduler instance."""
     from agents.data_agent import DataAgent
     from orchestrator.workflow import TradingScheduler
 
@@ -118,10 +133,26 @@ def run_scheduler():
     scheduler.start()
 
     if is_market_open():
-        _logger.info("Market is currently OPEN — running immediate scan")
-        scheduler.run_now()
+        _logger.info("Market is OPEN — running immediate scan in background")
+        threading.Thread(target=scheduler.run_now, daemon=True).start()
 
-    _logger.info("Scheduler running. Press Ctrl+C to stop.")
+    return scheduler
+
+
+def run_all():
+    """Start scheduler in a background thread, then launch the dashboard (default mode)."""
+    scheduler = _start_scheduler_thread()
+    _logger.info("Starting dashboard alongside scheduler — close the browser tab or press Ctrl+C to stop.")
+    try:
+        run_dashboard()
+    finally:
+        scheduler.stop()
+
+
+def run_scheduler():
+    """Headless mode — scheduler only, no dashboard."""
+    scheduler = _start_scheduler_thread()
+    _logger.info("Headless scheduler running. Press Ctrl+C to stop.")
     try:
         while True:
             time.sleep(60)
@@ -132,15 +163,19 @@ def run_scheduler():
 
 def main():
     parser = argparse.ArgumentParser(description="NSE/BSE Trading Agent")
-    parser.add_argument("--scan", action="store_true", help="Run one signal scan immediately")
-    parser.add_argument("--dashboard", action="store_true", help="Launch Streamlit dashboard")
+    parser.add_argument("--headless", action="store_true", help="Scheduler only, no dashboard (server use)")
+    parser.add_argument("--dashboard", action="store_true", help="Dashboard only, no scheduler")
+    parser.add_argument("--scan", action="store_true", help="Run one signal scan immediately and exit")
     parser.add_argument("--backtest", metavar="SYMBOL", help="Backtest a symbol")
     parser.add_argument("--strategy", default="swing", help="Strategy for backtest (default: swing)")
     parser.add_argument("--days", type=int, default=365, help="Backtest lookback days (default: 365)")
     parser.add_argument("--portfolio", action="store_true", help="Show portfolio stats")
+    parser.add_argument("--review", metavar="FEATURE", help="Architecture review for a proposed feature")
     args = parser.parse_args()
 
-    if args.dashboard:
+    if args.headless:
+        run_scheduler()
+    elif args.dashboard:
         run_dashboard()
     elif args.scan:
         run_single_scan()
@@ -148,8 +183,10 @@ def main():
         run_backtest(args.backtest, args.strategy, args.days)
     elif args.portfolio:
         show_portfolio()
+    elif args.review:
+        run_architecture_review(args.review)
     else:
-        run_scheduler()
+        run_all()
 
 
 if __name__ == "__main__":

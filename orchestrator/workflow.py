@@ -41,6 +41,8 @@ class TradingState(TypedDict):
     approved_trades: List[Any]
     sentiment: Dict[str, Any]
     tv_ratings: Dict[str, str]
+    perf_context: str
+    tuning_actions: List[Any]
     portfolio_stats: Dict[str, Any]
     closed_today: List[Any]
     errors: List[str]
@@ -79,8 +81,20 @@ def fetch_tv_ratings(state: TradingState) -> TradingState:
     return state
 
 
+def compute_performance(state: TradingState) -> TradingState:
+    _logger.info("Step 4a: Computing strategy performance context")
+    from agents.performance_tracker import PerformanceTracker
+    tracker = PerformanceTracker()
+    portfolio = PortfolioAgent()
+    df = portfolio.get_trade_history(limit=500)
+    strategy_stats = tracker.compute_strategy_stats(df)
+    symbol_stats = tracker.compute_symbol_stats(df)
+    state["perf_context"] = tracker.build_ai_context(strategy_stats, symbol_stats)
+    return state
+
+
 def generate_signals(state: TradingState) -> TradingState:
-    _logger.info("Step 4: Generating signals")
+    _logger.info("Step 4b: Generating signals")
     agent = SignalAgent()
     state["signals"] = agent.run(state["enriched_data"], tv_ratings=state.get("tv_ratings", {}))
     return state
@@ -90,7 +104,10 @@ def validate_with_claude(state: TradingState) -> TradingState:
     _logger.info("Step 5: Claude signal validation")
     agent = ClaudeValidationAgent()
     state["validated_signals"] = agent.run(
-        state["signals"], state["sentiment"], state.get("tv_ratings", {})
+        state["signals"],
+        state["sentiment"],
+        state.get("tv_ratings", {}),
+        state.get("perf_context", ""),
     )
     return state
 
@@ -141,6 +158,20 @@ def send_notifications(state: TradingState) -> TradingState:
     return state
 
 
+def run_auto_tune(state: TradingState) -> TradingState:
+    _logger.info("Step 9: Auto-tuning confidence thresholds")
+    from agents.auto_tuner import AutoTuner
+    from agents.performance_tracker import PerformanceTracker
+    portfolio = PortfolioAgent()
+    tracker = PerformanceTracker()
+    df = portfolio.get_trade_history(limit=500)
+    strategy_stats = tracker.compute_strategy_stats(df)
+    tuner = AutoTuner()
+    actions = tuner.run(strategy_stats, state.get("perf_context", ""))
+    state["tuning_actions"] = actions
+    return state
+
+
 # ── Graph definition ───────────────────────────────────────────────────────
 
 def build_graph() -> Any:
@@ -150,22 +181,26 @@ def build_graph() -> Any:
     workflow.add_node("run_ta", run_technical_analysis)
     workflow.add_node("fetch_sentiment", fetch_sentiment)
     workflow.add_node("fetch_tv_ratings", fetch_tv_ratings)
+    workflow.add_node("compute_performance", compute_performance)
     workflow.add_node("generate_signals", generate_signals)
     workflow.add_node("validate_claude", validate_with_claude)
     workflow.add_node("check_risk", check_risk)
     workflow.add_node("execute_trades", execute_paper_trades)
     workflow.add_node("send_notifications", send_notifications)
+    workflow.add_node("auto_tune", run_auto_tune)
 
     workflow.add_edge(START, "fetch_data")
     workflow.add_edge("fetch_data", "run_ta")
     workflow.add_edge("run_ta", "fetch_sentiment")
     workflow.add_edge("fetch_sentiment", "fetch_tv_ratings")
-    workflow.add_edge("fetch_tv_ratings", "generate_signals")
+    workflow.add_edge("fetch_tv_ratings", "compute_performance")
+    workflow.add_edge("compute_performance", "generate_signals")
     workflow.add_edge("generate_signals", "validate_claude")
     workflow.add_edge("validate_claude", "check_risk")
     workflow.add_edge("check_risk", "execute_trades")
     workflow.add_edge("execute_trades", "send_notifications")
-    workflow.add_edge("send_notifications", END)
+    workflow.add_edge("send_notifications", "auto_tune")
+    workflow.add_edge("auto_tune", END)
 
     return workflow.compile()
 
@@ -225,6 +260,7 @@ class TradingScheduler:
             "raw_data": {}, "enriched_data": {},
             "signals": [], "validated_signals": [],
             "approved_trades": [], "sentiment": {}, "tv_ratings": {},
+            "perf_context": "", "tuning_actions": [],
             "portfolio_stats": {}, "closed_today": [], "errors": [],
         }
         try:

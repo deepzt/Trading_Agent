@@ -514,7 +514,11 @@ def equity_drawdown_chart(history: pd.DataFrame, initial: float) -> go.Figure:
 
 def monthly_pnl_heatmap(history: pd.DataFrame) -> go.Figure:
     df = history.copy()
-    df["exit_time"] = pd.to_datetime(df["exit_time"])
+    df["exit_time"] = pd.to_datetime(
+        df["exit_time"].apply(
+            lambda x: datetime.fromisoformat(x).replace(tzinfo=None) if isinstance(x, str) and x else None
+        )
+    )
     df["month"] = df["exit_time"].dt.strftime("%b")
     df["year"] = df["exit_time"].dt.year
     pivot = df.pivot_table(values="pnl", index="year", columns="month", aggfunc="sum")
@@ -675,7 +679,7 @@ with st.sidebar:
 # ── Main tabs ──────────────────────────────────────────────────────────────
 
 TABS = ["📡 Market Pulse", "💼 Portfolio", "📊 Technical Chart",
-        "🔔 Live Signals", "🔬 Backtesting", "📋 Watchlist", "⚙️ Settings"]
+        "🔔 Live Signals", "🔬 Backtesting", "📋 Watchlist", "⚙️ Settings", "📈 System Health"]
 tabs = st.tabs(TABS)
 
 # ── Tab 1: Market Pulse ────────────────────────────────────────────────────
@@ -1264,15 +1268,175 @@ with tabs[6]:
     st.divider()
     st.markdown("#### Quick Commands")
     st.code("""
-# Start full trading system
+# Start everything (dashboard + scheduler) — recommended
 python main.py
 
-# One-shot signal scan
+# Scheduler only, no UI (server / background use)
+python main.py --headless
+
+# Dashboard only, no scheduler
+python main.py --dashboard
+
+# One-shot signal scan and exit
 python main.py --scan
 
 # Backtest a symbol
 python main.py --backtest RELIANCE --strategy swing --days 365
 
-# View portfolio
+# View portfolio in terminal
 python main.py --portfolio
 """, language="bash")
+
+# ── Tab 8: System Health ───────────────────────────────────────────────────
+
+with tabs[7]:
+    st.markdown("#### System Health & Auto-Improvement")
+    st.markdown(
+        "<div class='info-box' style='margin-bottom:1rem;'>The system automatically tracks per-strategy "
+        "performance, injects that context into AI validation, and adjusts confidence thresholds to "
+        "improve signal quality over time. This tab shows what the system is learning and doing.</div>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from agents.performance_tracker import PerformanceTracker
+        from agents.portfolio_agent import PortfolioAgent as _PA
+        import json as _json
+        from pathlib import Path as _Path
+
+        _portfolio = _PA()
+        _df = _portfolio.get_trade_history(limit=500)
+        _tracker = PerformanceTracker()
+        _strat_stats = _tracker.compute_strategy_stats(_df)
+        _sym_stats = _tracker.compute_symbol_stats(_df)
+        _tuning = _tracker.get_tuning_state()
+
+        _cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
+        with open(_cfg_path) as _f:
+            _cfg_yaml = yaml.safe_load(_f)
+        _default_threshold = float(_cfg_yaml["signals"]["min_confidence_for_claude"])
+
+        # ── Section 1: Strategy Performance ───────────────────────────────
+        st.markdown("#### Strategy Performance")
+        if _strat_stats:
+            _strat_cols = st.columns(len(_strat_stats))
+            for _i, (_strat, _s) in enumerate(sorted(_strat_stats.items())):
+                _wr = _s["win_rate"]
+                _wr_color = "#3fb950" if _wr >= 55 else ("#e3b341" if _wr >= 40 else "#f85149")
+                _strat_cols[_i].markdown(
+                    f"<div class='info-box' style='text-align:center;'>"
+                    f"<div style='font-size:0.75rem; color:#8b949e; text-transform:uppercase; letter-spacing:0.05em;'>"
+                    f"{_strat.title()}</div>"
+                    f"<div style='font-size:1.8rem; font-weight:700; color:{_wr_color};'>{_wr}%</div>"
+                    f"<div style='font-size:0.75rem; color:#8b949e;'>Win Rate</div>"
+                    f"<div style='font-size:0.85rem; margin-top:0.4rem;'>{_s['total_trades']} trades "
+                    f"· avg {_s['avg_r']}R</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No closed trades yet — strategy performance will appear after trades complete.")
+
+        # ── Section 2: Auto-Tuning Status ─────────────────────────────────
+        st.divider()
+        st.markdown("#### Auto-Tuning Status")
+        _overrides = _tuning.get("threshold_overrides", {})
+        _last_updated = _tuning.get("last_updated", "Never")
+
+        if _overrides or _strat_stats:
+            _all_strategies = set(list(_overrides.keys()) + list(_strat_stats.keys()))
+            _all_strategies.update(["swing", "intraday", "positional"])
+            _rows_html = ""
+            for _strat in sorted(_all_strategies):
+                _current = _overrides.get(_strat, _default_threshold)
+                _diff = round(_current - _default_threshold, 1)
+                _diff_str = f"+{_diff}" if _diff > 0 else str(_diff)
+                _diff_color = "#f85149" if _diff > 0 else ("#3fb950" if _diff < 0 else "#8b949e")
+                _arrow = "↑ more selective" if _diff > 0 else ("↓ more permissive" if _diff < 0 else "— no change")
+                _wr_display = f"{_strat_stats[_strat]['win_rate']}% WR, {_strat_stats[_strat]['total_trades']} trades" if _strat in _strat_stats else "Insufficient data"
+                _rows_html += (
+                    f"<tr>"
+                    f"<td style='padding:0.5rem 0.8rem; font-weight:600;'>{_strat.title()}</td>"
+                    f"<td style='padding:0.5rem 0.8rem; color:#8b949e;'>{_default_threshold}</td>"
+                    f"<td style='padding:0.5rem 0.8rem; font-weight:700; font-family:monospace;'>{_current}</td>"
+                    f"<td style='padding:0.5rem 0.8rem; color:{_diff_color}; font-family:monospace;'>{_diff_str} {_arrow}</td>"
+                    f"<td style='padding:0.5rem 0.8rem; color:#8b949e; font-size:0.8rem;'>{_wr_display}</td>"
+                    f"</tr>"
+                )
+            st.markdown(
+                f"<table style='width:100%; border-collapse:collapse; font-size:0.88rem;'>"
+                f"<thead><tr style='border-bottom:1px solid #30363d;'>"
+                f"<th style='padding:0.4rem 0.8rem; text-align:left; color:#8b949e;'>Strategy</th>"
+                f"<th style='padding:0.4rem 0.8rem; text-align:left; color:#8b949e;'>Default</th>"
+                f"<th style='padding:0.4rem 0.8rem; text-align:left; color:#8b949e;'>Current</th>"
+                f"<th style='padding:0.4rem 0.8rem; text-align:left; color:#8b949e;'>Adjustment</th>"
+                f"<th style='padding:0.4rem 0.8rem; text-align:left; color:#8b949e;'>Reason</th>"
+                f"</tr></thead><tbody>{_rows_html}</tbody></table>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"Last updated: {_last_updated}  ·  Thresholds adjust by ±0.5 when win rate exceeds bounds (min 5.0, max 8.5, requires 10+ trades)")
+        else:
+            st.info("Auto-tuning will activate after 10+ closed trades per strategy.")
+
+        # ── Section 3: AI Context Preview ─────────────────────────────────
+        st.divider()
+        st.markdown("#### AI Prompt Context")
+        _ai_ctx = _tuning.get("ai_context", "") or _tracker.build_ai_context(_strat_stats, _sym_stats)
+        if _ai_ctx:
+            st.caption("This performance summary is injected into every GPT-4o/Claude validation call:")
+            st.code(_ai_ctx, language=None)
+        else:
+            st.info("Performance context will appear here once enough trade history exists (5+ trades per strategy).")
+
+        # ── Section 4: Symbol Leaderboard ─────────────────────────────────
+        if _sym_stats:
+            st.divider()
+            st.markdown("#### Symbol Leaderboard")
+            _sorted_syms = sorted(_sym_stats.items(), key=lambda x: -x[1]["win_rate"])
+            _col_best, _col_worst = st.columns(2)
+            with _col_best:
+                st.markdown("**Top Performers**")
+                for _sym, _s in _sorted_syms[:5]:
+                    _bar = "█" * int(_s["win_rate"] / 10)
+                    st.markdown(
+                        f"<div class='info-box' style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<span style='font-weight:600;'>{_sym}</span>"
+                        f"<span style='color:#3fb950; font-family:monospace;'>{_s['win_rate']}% "
+                        f"({_s['wins']}/{_s['total_trades']})</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+            with _col_worst:
+                st.markdown("**Under-Performers**")
+                for _sym, _s in reversed(_sorted_syms[-5:]):
+                    st.markdown(
+                        f"<div class='info-box' style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<span style='font-weight:600;'>{_sym}</span>"
+                        f"<span style='color:#f85149; font-family:monospace;'>{_s['win_rate']}% "
+                        f"({_s['wins']}/{_s['total_trades']})</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # ── Section 5: Improvement History ────────────────────────────────
+        _history = _tuning.get("history", [])
+        if _history:
+            st.divider()
+            st.markdown("#### Auto-Tuning History")
+            for _entry in reversed(_history[-20:]):
+                _color = "#f85149" if "Raised" in _entry.get("action", "") else "#3fb950"
+                st.markdown(
+                    f"<div class='info-box' style='border-left:3px solid {_color}; padding-left:0.8rem;'>"
+                    f"<span style='font-size:0.75rem; color:#8b949e;'>{_entry.get('date','')}</span><br>"
+                    f"<span style='font-weight:600;'>{_entry.get('action','')}</span><br>"
+                    f"<span style='font-size:0.8rem; color:#8b949e;'>{_entry.get('reason','')}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        elif not _history and _strat_stats:
+            st.divider()
+            st.markdown("#### Auto-Tuning History")
+            st.info("No threshold adjustments yet — all strategies are within healthy win-rate range or have insufficient data.")
+
+    except Exception as _e:
+        st.error(f"Could not load system health data: {_e}")
