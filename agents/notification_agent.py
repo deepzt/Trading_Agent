@@ -61,7 +61,7 @@ class NotificationAgent(BaseAgent):
             closed_lines.append(f"{emoji} {t['symbol']}: {t['reason']} | P&L: ₹{t['pnl']:.2f}")
 
         msg = (
-            f"📊 *EOD Report — {date_str}*\n\n"
+            f"📊 <b>EOD Report — {date_str}</b>\n\n"
             f"Portfolio Equity: ₹{equity:,.2f}\n"
             f"Total P&L: ₹{pnl:,.2f}\n"
             f"Win Rate: {win_rate}%\n"
@@ -69,13 +69,13 @@ class NotificationAgent(BaseAgent):
             f"Max Drawdown: {portfolio_stats.get('max_drawdown_pct', 0)}%\n\n"
         )
         if closed_lines:
-            msg += "*Today's Trades:*\n" + "\n".join(closed_lines)
+            msg += "<b>Today's Trades:</b>\n" + "\n".join(closed_lines)
 
         return self._send_telegram(msg)
 
     def send_portfolio_update(self, stats: dict) -> bool:
         msg = (
-            f"💼 *Portfolio Update*\n"
+            f"💼 <b>Portfolio Update</b>\n"
             f"Equity: ₹{stats.get('current_equity', 0):,.2f}\n"
             f"P&L: ₹{stats.get('total_pnl', 0):,.2f}\n"
             f"Trades: {stats.get('total_trades', 0)} | Win: {stats.get('win_rate', 0)}%"
@@ -84,7 +84,7 @@ class NotificationAgent(BaseAgent):
 
     def send_alert(self, message: str) -> bool:
         """Send a custom alert message."""
-        return self._send_telegram(f"⚠️ *Trading Alert*\n{message}")
+        return self._send_telegram(f"⚠️ <b>Trading Alert</b>\n{self._escape_html(message)}")
 
     # ── Private ─────────────────────────────────────────────────────────────
 
@@ -101,10 +101,10 @@ class NotificationAgent(BaseAgent):
 
         verdict_line = ""
         if signal.claude_verdict == "APPROVE" and signal.claude_reasoning:
-            verdict_line = f"\n🤖 *AI*: {signal.claude_reasoning}"
+            verdict_line = f"\n🤖 <b>AI</b>: {self._escape_html(signal.claude_reasoning)}"
 
         return (
-            f"{emoji} *{signal.signal_type} Signal: {signal.symbol}*\n"
+            f"{emoji} <b>{signal.signal_type} Signal: {signal.symbol}</b>\n"
             f"Strategy: {signal.strategy.title()} | Confidence: {signal.confidence}/10\n\n"
             f"Entry: ₹{signal.entry_price:,.2f}\n"
             f"Stop Loss: ₹{signal.stop_loss:,.2f} ({signal.sl_pct}% risk)\n"
@@ -112,10 +112,14 @@ class NotificationAgent(BaseAgent):
             f"Target 2: ₹{signal.target_2:,.2f}\n"
             f"Risk/Reward: {signal.risk_reward}x\n"
             f"{risk_info}"
-            f"\n📋 *Reasons*: {' · '.join(signal.reasons[:3])}"
+            f"\n📋 <b>Reasons</b>: {self._escape_html(' · '.join(signal.reasons[:3]))}"
             f"{verdict_line}\n"
             f"🕐 {signal.timestamp[:19]}"
         )
+
+    def _escape_html(self, text: str) -> str:
+        """Escape HTML special characters so Telegram's HTML parser doesn't choke."""
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def _send_telegram(self, text: str) -> bool:
         if not self._bot_token or not self._chat_ids:
@@ -129,7 +133,7 @@ class NotificationAgent(BaseAgent):
                 resp = requests.post(url, json={
                     "chat_id": chat_id,
                     "text": text,
-                    "parse_mode": "Markdown",
+                    "parse_mode": "HTML",
                 }, timeout=10)
                 resp.raise_for_status()
                 success = True

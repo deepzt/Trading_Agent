@@ -171,6 +171,7 @@ def main():
     parser.add_argument("--days", type=int, default=365, help="Backtest lookback days (default: 365)")
     parser.add_argument("--portfolio", action="store_true", help="Show portfolio stats")
     parser.add_argument("--review", metavar="FEATURE", help="Architecture review for a proposed feature")
+    parser.add_argument("--research-review", action="store_true", help="Run Trading Specialist Agent for research-backed improvement suggestions")
     args = parser.parse_args()
 
     if args.headless:
@@ -185,6 +186,13 @@ def main():
         show_portfolio()
     elif args.review:
         run_architecture_review(args.review)
+    elif getattr(args, "research_review", False):
+        from agents.trading_specialist_agent import TradingSpecialistAgent
+        report = TradingSpecialistAgent().run()
+        print("\n" + "=" * 70)
+        print("TRADING RESEARCH IMPROVEMENT REPORT")
+        print("=" * 70 + "\n")
+        print(report)
     else:
         run_all()
 

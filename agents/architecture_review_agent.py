@@ -307,7 +307,7 @@ class ArchitectureReviewAgent(BaseAgent):
             console.print()
             console.print("[bold yellow]Risks[/]")
             for risk in review.risks:
-                console.print(f"  ⚠ {risk}")
+                console.print(f"  [!] {risk}")
 
         # Dependencies
         if review.dependencies:

@@ -121,11 +121,11 @@ Respond ONLY with JSON:
         }
 
     def _get_market_context(self) -> dict:
-        """Get Nifty 50 trend and India VIX from yfinance."""
+        """Get Nifty 50 trend, India VIX, and 30-day history for regime detection."""
         try:
             import yfinance as yf
             nifty = yf.Ticker("^NSEI")
-            hist = nifty.history(period="5d")
+            hist = nifty.history(period="30d")
             if hist.empty:
                 return {}
             last_close = float(hist["Close"].iloc[-1])
@@ -134,7 +134,7 @@ Respond ONLY with JSON:
             trend = "BULLISH" if change_pct > 0.5 else ("BEARISH" if change_pct < -0.5 else "NEUTRAL")
 
             vix_ticker = yf.Ticker("^INDIAVIX")
-            vix_hist = vix_ticker.history(period="2d")
+            vix_hist = vix_ticker.history(period="30d")
             vix = float(vix_hist["Close"].iloc[-1]) if not vix_hist.empty else 0
 
             return {
@@ -142,6 +142,7 @@ Respond ONLY with JSON:
                 "nifty_change_pct": round(change_pct, 2),
                 "trend": trend,
                 "vix": round(vix, 1),
+                "nifty_history": hist["Close"],  # pd.Series — used by RegimeDetector for EMA20
             }
         except Exception:
             return {}

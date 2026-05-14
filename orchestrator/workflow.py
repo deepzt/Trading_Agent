@@ -15,8 +15,10 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.claude_validation_agent import ClaudeValidationAgent
 from agents.data_agent import DataAgent
+from agents.earnings_calendar_agent import EarningsCalendarAgent
 from agents.notification_agent import NotificationAgent
 from agents.portfolio_agent import PortfolioAgent
+from agents.regime_detector import RegimeDetector
 from agents.risk_agent import RiskAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.signal_agent import SignalAgent
@@ -46,6 +48,9 @@ class TradingState(TypedDict):
     portfolio_stats: Dict[str, Any]
     closed_today: List[Any]
     errors: List[str]
+    regime: str
+    earnings_blackout_symbols: List[str]
+    momentum_ranks: Dict[str, float]
 
 
 # ── Node functions (each agent step) ──────────────────────────────────────
@@ -81,6 +86,36 @@ def fetch_tv_ratings(state: TradingState) -> TradingState:
     return state
 
 
+def detect_regime(state: TradingState) -> TradingState:
+    _logger.info("Step 3c: Detecting market regime")
+    try:
+        import yaml
+        from pathlib import Path
+        cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        regime_cfg = cfg.get("regime", {})
+        market = state.get("sentiment", {}).get("_market", {})
+        vix = market.get("vix", 0)
+        nifty_history = market.get("nifty_history")
+        state["regime"] = RegimeDetector().run(vix, nifty_history, regime_cfg)
+    except Exception as e:
+        _logger.error(f"Regime detection failed: {e} — defaulting to TRENDING")
+        state["regime"] = "TRENDING"
+    return state
+
+
+def check_earnings(state: TradingState) -> TradingState:
+    _logger.info("Step 3d: Checking earnings blackout calendar")
+    try:
+        symbols = list(state["enriched_data"].keys())
+        state["earnings_blackout_symbols"] = EarningsCalendarAgent().run(symbols)
+    except Exception as e:
+        _logger.error(f"Earnings calendar node failed: {e} — no blackouts applied")
+        state["earnings_blackout_symbols"] = []
+    return state
+
+
 def compute_performance(state: TradingState) -> TradingState:
     _logger.info("Step 4a: Computing strategy performance context")
     from agents.performance_tracker import PerformanceTracker
@@ -90,13 +125,23 @@ def compute_performance(state: TradingState) -> TradingState:
     strategy_stats = tracker.compute_strategy_stats(df)
     symbol_stats = tracker.compute_symbol_stats(df)
     state["perf_context"] = tracker.build_ai_context(strategy_stats, symbol_stats)
+    try:
+        state["momentum_ranks"] = tracker.compute_momentum_rank(state.get("raw_data", {}))
+    except Exception as e:
+        _logger.error(f"Momentum rank computation failed: {e}")
+        state["momentum_ranks"] = {}
     return state
 
 
 def generate_signals(state: TradingState) -> TradingState:
     _logger.info("Step 4b: Generating signals")
     agent = SignalAgent()
-    state["signals"] = agent.run(state["enriched_data"], tv_ratings=state.get("tv_ratings", {}))
+    state["signals"] = agent.run(
+        state["enriched_data"],
+        tv_ratings=state.get("tv_ratings", {}),
+        regime=state.get("regime", "TRENDING"),
+        momentum_ranks=state.get("momentum_ranks", {}),
+    )
     return state
 
 
@@ -116,7 +161,11 @@ def check_risk(state: TradingState) -> TradingState:
     _logger.info("Step 6: Risk checks and position sizing")
     portfolio = PortfolioAgent()
     agent = RiskAgent(portfolio)
-    approved_with_qty = agent.run([s for s in state["validated_signals"] if s.status == "APPROVED"])
+    context = {"earnings_blackout_symbols": state.get("earnings_blackout_symbols", [])}
+    approved_with_qty = agent.run(
+        [s for s in state["validated_signals"] if s.status == "APPROVED"],
+        context=context,
+    )
 
     # Build list of (signal, quantity, position_info)
     trades = []
@@ -180,7 +229,9 @@ def build_graph() -> Any:
     workflow.add_node("fetch_data", fetch_data)
     workflow.add_node("run_ta", run_technical_analysis)
     workflow.add_node("fetch_sentiment", fetch_sentiment)
+    workflow.add_node("detect_regime", detect_regime)
     workflow.add_node("fetch_tv_ratings", fetch_tv_ratings)
+    workflow.add_node("check_earnings", check_earnings)
     workflow.add_node("compute_performance", compute_performance)
     workflow.add_node("generate_signals", generate_signals)
     workflow.add_node("validate_claude", validate_with_claude)
@@ -192,8 +243,10 @@ def build_graph() -> Any:
     workflow.add_edge(START, "fetch_data")
     workflow.add_edge("fetch_data", "run_ta")
     workflow.add_edge("run_ta", "fetch_sentiment")
-    workflow.add_edge("fetch_sentiment", "fetch_tv_ratings")
-    workflow.add_edge("fetch_tv_ratings", "compute_performance")
+    workflow.add_edge("fetch_sentiment", "detect_regime")
+    workflow.add_edge("detect_regime", "fetch_tv_ratings")
+    workflow.add_edge("fetch_tv_ratings", "check_earnings")
+    workflow.add_edge("check_earnings", "compute_performance")
     workflow.add_edge("compute_performance", "generate_signals")
     workflow.add_edge("generate_signals", "validate_claude")
     workflow.add_edge("validate_claude", "check_risk")
@@ -234,7 +287,17 @@ class TradingScheduler:
             if q:
                 live_prices[sym] = q["last_price"]
 
-        closed = broker.check_exits(live_prices)
+        # Fetch TA data for open position symbols only (for T1 reversal detection)
+        ta_data = {}
+        try:
+            open_syms = list({p["symbol"] for p in portfolio.get_open_positions()})
+            if open_syms:
+                raw = data_agent.run(open_syms, timeframe="1d", days=30)
+                ta_data = TechnicalAnalysisAgent().run(raw)
+        except Exception as e:
+            _logger.warning(f"T1 reversal TA fetch failed: {e} — reversal check skipped")
+
+        closed = broker.check_exits(live_prices, ta_data=ta_data)
         if closed:
             notif = NotificationAgent()
             for trade in closed:
@@ -242,6 +305,41 @@ class TradingScheduler:
                 notif.send_alert(
                     f"{emoji} {trade['symbol']} closed: {trade['reason']} | P&L ₹{trade.get('pnl', 0):.2f}"
                 )
+
+    def _run_intraday_eod_close(self):
+        if not is_trading_day():
+            return
+        import yaml
+        from pathlib import Path
+        cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        if not cfg.get("strategies", {}).get("intraday", {}).get("auto_close_eod", True):
+            return
+
+        _logger.info("=== INTRADAY EOD CLOSE ===")
+        data_agent = DataAgent()
+        portfolio = PortfolioAgent()
+        broker = PaperBroker(portfolio)
+
+        # Fetch live prices for all symbols with open intraday positions
+        open_positions = portfolio.get_open_positions()
+        intraday_syms = [p["symbol"] for p in open_positions if p.get("strategy") == "intraday"]
+        live_prices = {}
+        for sym in intraday_syms:
+            q = data_agent.get_live_quote(sym)
+            if q:
+                live_prices[sym] = q["last_price"]
+
+        closed = broker.close_intraday_eod(live_prices)
+        if closed:
+            notif = NotificationAgent()
+            for trade in closed:
+                emoji = "✅" if (trade.get("pnl") or 0) >= 0 else "❌"
+                notif.send_alert(
+                    f"{emoji} EOD Close: {trade['symbol']} @ ₹{trade['exit_price']:.2f} | P&L ₹{trade.get('pnl', 0):.2f}"
+                )
+            _logger.info(f"EOD closed {len(closed)} intraday position(s)")
 
     def _run_eod_report(self):
         if not is_trading_day():
@@ -262,6 +360,9 @@ class TradingScheduler:
             "approved_trades": [], "sentiment": {}, "tv_ratings": {},
             "perf_context": "", "tuning_actions": [],
             "portfolio_stats": {}, "closed_today": [], "errors": [],
+            "regime": "TRENDING",
+            "earnings_blackout_symbols": [],
+            "momentum_ranks": {},
         }
         try:
             self._graph.invoke(initial_state)
@@ -273,15 +374,26 @@ class TradingScheduler:
         self._run_workflow()
 
     def start(self):
-        # Morning scan at 9:15 AM IST
+        # Morning scan at 9:15 AM IST — allow up to 10 min late, never overlap
         self._scheduler.add_job(self._run_morning_scan, "cron",
-                                 hour=9, minute=15, day_of_week="mon-fri")
-        # Intraday monitor every 15 minutes 9:30 AM – 3:15 PM
+                                 hour=9, minute=15, day_of_week="mon-fri",
+                                 max_instances=1, coalesce=True,
+                                 misfire_grace_time=600)
+        # Intraday monitor every 15 min — if missed, run once (don't stack)
         self._scheduler.add_job(self._run_intraday_monitor, "cron",
-                                 hour="9-15", minute="*/15", day_of_week="mon-fri")
+                                 hour="9-15", minute="*/15", day_of_week="mon-fri",
+                                 max_instances=1, coalesce=True,
+                                 misfire_grace_time=None)
+        # Intraday EOD auto-close at 3:20 PM (after last SL/TP check at 3:15)
+        self._scheduler.add_job(self._run_intraday_eod_close, "cron",
+                                 hour=15, minute=20, day_of_week="mon-fri",
+                                 max_instances=1, coalesce=True,
+                                 misfire_grace_time=300)
         # EOD report at 3:45 PM
         self._scheduler.add_job(self._run_eod_report, "cron",
-                                 hour=15, minute=45, day_of_week="mon-fri")
+                                 hour=15, minute=45, day_of_week="mon-fri",
+                                 max_instances=1, coalesce=True,
+                                 misfire_grace_time=600)
         self._scheduler.start()
         _logger.info("Trading scheduler started (IST timezone)")
 

@@ -104,18 +104,23 @@ class SignalAgent(BaseAgent):
             self._risk = yaml.safe_load(f)
 
     def run(self, enriched_data: Dict[str, pd.DataFrame], active_strategies: Optional[List[str]] = None,
-            tv_ratings: Optional[Dict[str, str]] = None) -> List[Signal]:
+            tv_ratings: Optional[Dict[str, str]] = None, regime: str = "TRENDING",
+            momentum_ranks: Optional[Dict[str, float]] = None) -> List[Signal]:
         """Screen all symbols and return list of signals above confidence threshold."""
         if active_strategies is None:
             active_strategies = self._cfg["strategies"]["active"]
         tv = tv_ratings or {}
+        ranks = momentum_ranks or {}
+
+        if regime == "CRISIS":
+            self.log_info("Regime CRISIS — intraday signals suppressed this scan")
 
         signals: List[Signal] = []
         for symbol, df in enriched_data.items():
             if df is None or len(df) < 50:
                 continue
             for strategy in active_strategies:
-                sig = self._screen(symbol, df, strategy, tv)
+                sig = self._screen(symbol, df, strategy, tv, regime, ranks)
                 if sig:
                     signals.append(sig)
 
@@ -124,24 +129,25 @@ class SignalAgent(BaseAgent):
         max_signals = self._cfg["signals"]["max_signals_per_run"]
         signals = signals[:max_signals]
 
-        self.log_info(f"Generated {len(signals)} signals from {len(enriched_data)} symbols")
+        self.log_info(f"Generated {len(signals)} signals from {len(enriched_data)} symbols (regime={regime})")
         return signals
 
-    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str, tv_ratings: dict) -> Optional[Signal]:
+    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str, tv_ratings: dict,
+                regime: str = "TRENDING", momentum_ranks: dict = None) -> Optional[Signal]:
         try:
             if strategy == "swing":
-                return self._swing_signal(symbol, df, tv_ratings)
+                return self._swing_signal(symbol, df, tv_ratings, regime)
             elif strategy == "intraday":
-                return self._intraday_signal(symbol, df, tv_ratings)
+                return self._intraday_signal(symbol, df, tv_ratings, regime)
             elif strategy == "positional":
-                return self._positional_signal(symbol, df, tv_ratings)
+                return self._positional_signal(symbol, df, tv_ratings, momentum_ranks)
         except Exception as e:
             self.log_error(f"Signal error {symbol}/{strategy}: {e}")
         return None
 
     # ── Strategy screeners ─────────────────────────────────────────────────
 
-    def _swing_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
+    def _swing_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
         """EMA 9/21 crossover + RSI in sweet spot + above EMA50."""
         cfg = self._cfg["strategies"]["swing"]
         row = df.iloc[-1]
@@ -204,7 +210,10 @@ class SignalAgent(BaseAgent):
 
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.02)
-        sl_dist = atr * self._risk["stop_loss"]["atr_multiplier"]
+        atr_mult = self._risk["stop_loss"]["atr_multiplier"]
+        if regime == "VOLATILE":
+            atr_mult = round(atr_mult * 1.33, 2)  # Wider stop in volatile markets
+        sl_dist = atr * atr_mult
 
         stop_loss = entry - sl_dist
         target_1 = entry + sl_dist * self._risk["targets"]["t1_rr_ratio"]
@@ -219,8 +228,10 @@ class SignalAgent(BaseAgent):
         sig.tv_rating = tv_rating
         return sig
 
-    def _intraday_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
+    def _intraday_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
         """Breakout above previous day's high with volume surge."""
+        if regime == "CRISIS":
+            return None  # No intraday breakout signals during market crisis
         cfg = self._cfg["strategies"]["intraday"]
         if len(df) < 5:
             return None
@@ -274,7 +285,8 @@ class SignalAgent(BaseAgent):
 
         entry = close
         atr = row.get("ATRr_14", entry * 0.015)
-        sl_dist = max(atr * 1.0, (entry - float(row["low"])) * 1.1)
+        atr_mult = 1.33 if regime == "VOLATILE" else 1.0
+        sl_dist = max(atr * atr_mult, (entry - float(row["low"])) * 1.1)
 
         stop_loss = entry - sl_dist
         target_1 = entry + sl_dist * 1.0
@@ -289,12 +301,20 @@ class SignalAgent(BaseAgent):
         sig.tv_rating = tv_rating
         return sig
 
-    def _positional_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict) -> Optional[Signal]:
-        """Weekly trend following — price above 200 EMA, strong momentum."""
+    def _positional_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict,
+                           momentum_ranks: dict = None) -> Optional[Signal]:
+        """Weekly trend following — price above 200 EMA, strong momentum, top sector rank."""
         cfg = self._cfg["strategies"]["positional"]
         if len(df) < 200:
             return None
         row = df.iloc[-1]
+
+        # Sector-neutral momentum gate: must be in top 40% within sector
+        if momentum_ranks:
+            rank = momentum_ranks.get(symbol, 0.5)
+            if rank < 0.6:
+                self.log_info(f"{symbol}: positional skipped — sector momentum rank {rank:.2f} < 0.6")
+                return None
 
         reasons = []
         score = 0.0

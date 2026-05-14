@@ -351,13 +351,18 @@ def render_signal_card(sig: dict):
         f'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">TV: {tv_rating}</span>'
         if tv_rating and tv_rating not in ("UNKNOWN", "") else ""
     )
+    blackout_badge = (
+        '<span style="background:#d2992222; color:#d29922; border:1px solid #d29922; '
+        'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">🔒 EARNINGS BLACKOUT</span>'
+        if sig.get("_blackout") else ""
+    )
 
     st.markdown(f"""
     <div class="{cls}">
         <div style="display:flex; justify-content:space-between; align-items:start;">
             <div>
                 <span class="signal-symbol">{'🟢' if is_buy else '🔴'} {sig.get('symbol','')}</span>
-                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{tv_badge}
+                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{tv_badge}{blackout_badge}
             </div>
             <span style="color:#8b949e; font-size:0.72rem;">{str(sig.get('timestamp',''))[:19]}</span>
         </div>
@@ -690,6 +695,28 @@ with tabs[0]:
     with st.spinner("Fetching live data..."):
         indices = fetch_indices()
 
+    # Regime badge derived from live VIX
+    _vix_val = indices.get("INDIA VIX", {}).get("price", 0) or 0
+    try:
+        _vix_float = float(_vix_val)
+    except Exception:
+        _vix_float = 0.0
+    if _vix_float >= 24:
+        _regime_label, _regime_color = "CRISIS", "#f85149"
+    elif _vix_float >= 18:
+        _regime_label, _regime_color = "VOLATILE", "#d29922"
+    else:
+        _regime_label, _regime_color = "TRENDING", "#3fb950"
+    _regime_icon = {"CRISIS": "🔴", "VOLATILE": "🟡", "TRENDING": "🟢"}[_regime_label]
+    st.markdown(
+        f'<div style="display:inline-block;background:{_regime_color}22;border:1px solid {_regime_color};'
+        f'border-radius:6px;padding:3px 12px;font-size:0.85rem;font-weight:600;color:{_regime_color};margin-bottom:8px;">'
+        f'{_regime_icon} Market Regime: {_regime_label}'
+        + (f' &nbsp;|&nbsp; VIX {_vix_float:.1f}' if _vix_float else '')
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
     render_ticker_strip(indices)
     st.divider()
 
@@ -864,21 +891,56 @@ with tabs[1]:
                               legend=dict(font=dict(size=10)))
             st.plotly_chart(fig, use_container_width=True)
 
-        # Open positions
+        # Fetch live prices once — reused by both breakdown and open positions table
         positions = portfolio.get_open_positions()
-        st.markdown(f"#### Open Positions ({len(positions)})")
-        if positions:
-            # Fetch live prices and compute unrealized P&L
-            live_data = {}
-            for p in positions:
+        live_data = {}
+        for p in positions:
+            sym = p["symbol"]
+            if sym not in live_data:
                 try:
-                    t = yf.Ticker(f"{p['symbol']}.NS")
+                    t = yf.Ticker(f"{sym}.NS")
                     h = t.history(period="1d")
                     if not h.empty:
-                        live_data[p["symbol"]] = float(h["Close"].iloc[-1])
+                        live_data[sym] = float(h["Close"].iloc[-1])
                 except Exception:
                     pass
 
+        # Stock breakdown — investment + consolidated P&L per symbol
+        all_syms = sorted(set(
+            [p["symbol"] for p in positions] +
+            (list(history["symbol"].unique()) if not history.empty else [])
+        ))
+        breakdown_rows = []
+        for sym in all_syms:
+            open_sym = [p for p in positions if p["symbol"] == sym]
+            invested = sum(p["entry_price"] * p["quantity"] for p in open_sym)
+            unrealized = sum(
+                (live_data.get(sym, p["entry_price"]) - p["entry_price"]) * p["quantity"]
+                for p in open_sym
+            )
+            closed_sym = history[history["symbol"] == sym] if not history.empty else pd.DataFrame()
+            realized = round(closed_sym["pnl"].sum(), 2) if not closed_sym.empty else 0.0
+            closed_count = len(closed_sym)
+            wins = len(closed_sym[closed_sym["pnl"] > 0]) if not closed_sym.empty else 0
+            win_rate = round(wins / closed_count * 100, 1) if closed_count > 0 else None
+            total_pnl = round(realized + unrealized, 2)
+            breakdown_rows.append({
+                "Symbol": sym,
+                "Open Trades": len(open_sym),
+                "Invested": f"₹{invested:,.0f}" if invested > 0 else "—",
+                "Unrealized P&L": f"₹{unrealized:+,.0f}" if invested > 0 else "—",
+                "Realized P&L": f"₹{realized:+,.0f}" if closed_count > 0 else "—",
+                "Total P&L": f"₹{total_pnl:+,.0f}",
+                "Closed Trades": closed_count,
+                "Win Rate": f"{win_rate}%" if win_rate is not None else "—",
+            })
+        with st.expander("📊 Stock Breakdown — Investment & P&L per Symbol", expanded=False):
+            st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
+
+        # Open positions
+        st.divider()
+        st.markdown(f"#### Open Positions ({len(positions)})")
+        if positions:
             pos_rows = []
             for p in positions:
                 lp = live_data.get(p["symbol"], p["entry_price"])
@@ -982,6 +1044,18 @@ with tabs[3]:
     st.markdown("#### Signal Log")
     portfolio = PortfolioAgent()
 
+    @st.cache_data(ttl=300)
+    def _fetch_blackout_symbols():
+        try:
+            from agents.earnings_calendar_agent import EarningsCalendarAgent as _ECA
+            from agents.data_agent import DataAgent as _DA
+            syms = _DA().get_watchlist("nifty50") + _DA().get_watchlist("nifty200")
+            return _ECA().run(list(set(syms)))
+        except Exception:
+            return []
+
+    _blackout_syms = _fetch_blackout_symbols()
+
     try:
         from sqlalchemy import text as sqlt
         with portfolio._engine.connect() as conn:
@@ -1022,7 +1096,9 @@ with tabs[3]:
         st.divider()
 
         for _, row in filtered.head(20).iterrows():
-            render_signal_card(row.to_dict())
+            sig_dict = row.to_dict()
+            sig_dict["_blackout"] = sig_dict.get("symbol", "") in _blackout_syms
+            render_signal_card(sig_dict)
     else:
         st.info("No signals yet. Click 'Run Signal Scan' in the sidebar.")
 

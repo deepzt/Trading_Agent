@@ -121,5 +121,38 @@ class PerformanceTracker(BaseAgent):
     def get_history(self) -> List[dict]:
         return self.get_tuning_state().get("history", [])
 
+    def compute_momentum_rank(self, raw_data: Dict[str, "pd.DataFrame"]) -> Dict[str, float]:
+        """12-1 month sector-neutral momentum rank (0.0–1.0) per symbol.
+        Symbols with insufficient history default to 0.5 (neutral — no filter applied)."""
+        from strategies.positional import get_sector
+
+        momentum: Dict[str, float] = {}
+        for sym, df in raw_data.items():
+            if df is None or len(df) < 252:
+                momentum[sym] = 0.5
+                continue
+            close_col = "Close" if "Close" in df.columns else "close"
+            try:
+                price_252 = float(df[close_col].iloc[-252])
+                price_21 = float(df[close_col].iloc[-21])
+                momentum[sym] = (price_21 - price_252) / price_252 if price_252 > 0 else 0.0
+            except Exception:
+                momentum[sym] = 0.5
+
+        sector_groups: Dict[str, list] = {}
+        for sym in momentum:
+            sector = get_sector(sym)
+            sector_groups.setdefault(sector, []).append(sym)
+
+        ranks: Dict[str, float] = {}
+        for sector, syms in sector_groups.items():
+            sorted_syms = sorted(syms, key=lambda s: momentum[s])
+            n = len(sorted_syms)
+            for i, sym in enumerate(sorted_syms):
+                ranks[sym] = round((i + 1) / n, 2)
+
+        self.log_info(f"Momentum ranks computed for {len(ranks)} symbols across {len(sector_groups)} sectors")
+        return ranks
+
     def run(self, *args, **kwargs):
         pass

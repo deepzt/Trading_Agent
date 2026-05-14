@@ -49,7 +49,14 @@ CREATE TABLE IF NOT EXISTS signals_log (
     claude_reasoning TEXT,
     timestamp TEXT,
     status TEXT,
-    tv_rating TEXT
+    tv_rating TEXT,
+    entry_price REAL,
+    stop_loss REAL,
+    target_1 REAL,
+    target_2 REAL,
+    risk_reward REAL,
+    sl_pct REAL,
+    timeframe TEXT
 );
 """
 
@@ -71,11 +78,22 @@ class PortfolioAgent(BaseAgent):
                 stmt = stmt.strip()
                 if stmt:
                     conn.execute(text(stmt))
-            # Migrate existing DB: add tv_rating column if absent
-            try:
-                conn.execute(text("ALTER TABLE signals_log ADD COLUMN tv_rating TEXT"))
-            except Exception:
-                pass  # Column already exists
+            # Migrate existing DB — add columns that may be absent in older DBs
+            _new_cols = [
+                ("tv_rating", "TEXT"),
+                ("entry_price", "REAL"),
+                ("stop_loss", "REAL"),
+                ("target_1", "REAL"),
+                ("target_2", "REAL"),
+                ("risk_reward", "REAL"),
+                ("sl_pct", "REAL"),
+                ("timeframe", "TEXT"),
+            ]
+            for col, col_type in _new_cols:
+                try:
+                    conn.execute(text(f"ALTER TABLE signals_log ADD COLUMN {col} {col_type}"))
+                except Exception:
+                    pass  # Column already exists
             conn.commit()
 
     # ── Position management ────────────────────────────────────────────────
@@ -206,8 +224,11 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("""
                 INSERT OR REPLACE INTO signals_log
                     (id, symbol, strategy, signal_type, confidence, claude_verdict,
-                     claude_reasoning, timestamp, status, tv_rating)
-                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :tvr)
+                     claude_reasoning, timestamp, status, tv_rating,
+                     entry_price, stop_loss, target_1, target_2,
+                     risk_reward, sl_pct, timeframe)
+                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :tvr,
+                        :ep, :sl, :t1, :t2, :rr, :slp, :tf)
             """), {
                 "id": signal_dict.get("id"),
                 "sym": signal_dict.get("symbol"),
@@ -219,5 +240,12 @@ class PortfolioAgent(BaseAgent):
                 "ts": signal_dict.get("timestamp"),
                 "st": signal_dict.get("status"),
                 "tvr": signal_dict.get("tv_rating", "UNKNOWN"),
+                "ep": signal_dict.get("entry_price"),
+                "sl": signal_dict.get("stop_loss"),
+                "t1": signal_dict.get("target_1"),
+                "t2": signal_dict.get("target_2"),
+                "rr": signal_dict.get("risk_reward"),
+                "slp": signal_dict.get("sl_pct"),
+                "tf": signal_dict.get("timeframe"),
             })
             conn.commit()

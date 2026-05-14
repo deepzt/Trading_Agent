@@ -22,10 +22,11 @@ class RiskAgent(BaseAgent):
             self._cfg = yaml.safe_load(f)
         self._portfolio_agent = portfolio_agent
 
-    def run(self, signals: List[Signal]) -> List[Tuple[Signal, int]]:
+    def run(self, signals: List[Signal], context: dict = None) -> List[Tuple[Signal, int]]:
         """
         Filter and size each signal.
         Returns list of (signal, quantity) for approved signals.
+        context: optional dict with keys like 'earnings_blackout_symbols'.
         """
         if not self._trading_enabled():
             self.log_warning("TRADING_ENABLED=false — all signals blocked")
@@ -48,7 +49,7 @@ class RiskAgent(BaseAgent):
                 self.log_info(f"Max positions ({max_pos}) reached, skipping {signal.symbol}")
                 break
 
-            ok, reason = self._check_signal(signal, open_positions)
+            ok, reason = self._check_signal(signal, open_positions, context)
             if ok:
                 qty = self._calculate_quantity(signal)
                 if qty >= 1:
@@ -60,9 +61,20 @@ class RiskAgent(BaseAgent):
 
         return approved
 
-    def _check_signal(self, signal: Signal, current_positions: int) -> Tuple[bool, str]:
+    def _check_signal(self, signal: Signal, current_positions: int, context: dict = None) -> Tuple[bool, str]:
         """Returns (approved, rejection_reason)."""
         cfg = self._cfg
+
+        # Duplicate position check — one open position per symbol maximum
+        if self._portfolio_agent:
+            open_syms = [p["symbol"] for p in self._portfolio_agent.get_open_positions()]
+            if signal.symbol in open_syms:
+                return False, f"Already have open position in {signal.symbol}"
+
+        # Earnings blackout — hard block swing/positional within 3 trading days of board meeting
+        blackout_syms = (context or {}).get("earnings_blackout_symbols", [])
+        if signal.symbol in blackout_syms and signal.strategy in ("swing", "positional"):
+            return False, f"Earnings blackout: board meeting within 3 trading days"
 
         # Min confidence check
         min_conf = 7.0  # After Claude validation, should be at least 7
