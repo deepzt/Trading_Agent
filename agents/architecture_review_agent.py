@@ -24,7 +24,7 @@ NSE/BSE multi-agent algorithmic trading system — Python 3.11+, Streamlit dashb
 LangGraph StateGraph orchestration, SQLite storage, paper trading only (no live broker yet).
 
 ## Agent Pipeline (sequential LangGraph nodes)
-fetch_data → run_ta → fetch_sentiment → fetch_tv_ratings
+fetch_data → run_ta → fetch_sentiment → fetch_composite_ratings
 → generate_signals → validate_with_claude → check_risk
 → execute_paper_trades → send_notifications
 
@@ -32,8 +32,8 @@ fetch_data → run_ta → fetch_sentiment → fetch_tv_ratings
 DataAgent           data_agent.py              Fetches OHLCV via yfinance; manages Nifty 50 watchlist
 TechnicalAnalysisAgent technical_analysis_agent.py Computes 30+ indicators: RSI, MACD, Bollinger Bands, EMA(9/21/50/200), ATR, ADX, OBV
 SentimentAgent      sentiment_agent.py         Scrapes NSE RSS + Google Finance; per-symbol sentiment label + headline
-TradingViewTAAgent  tradingview_ta_agent.py    Fetches free TradingView ratings (STRONG_BUY…STRONG_SELL) for each NSE symbol
-SignalAgent         signal_agent.py            Generates BUY/SELL signals via swing/intraday/positional strategies; applies TV score adj
+CompositeTAAgent    tradingview_ta_agent.py    Computes in-house composite TA ratings (STRONG_BUY…STRONG_SELL) from enriched indicators; no external dep.
+SignalAgent         signal_agent.py            Generates BUY/SELL signals via swing/intraday/positional strategies; applies composite TA score adj
 ClaudeValidationAgent claude_validation_agent.py Validates signals via Anthropic Claude or OpenAI GPT-4o; APPROVE/REJECT/MODIFY + reasoning
 RiskAgent           risk_agent.py              Position sizing, max exposure, daily loss limit, portfolio-level risk controls
 PortfolioAgent      portfolio_agent.py         Paper trades in SQLite; tracks open/closed positions, equity, P&L, win rate
@@ -46,7 +46,7 @@ All jobs check is_market_open() / is_trading_day() before executing.
 
 ## Database (SQLite via SQLAlchemy, data/trading.db)
 signals_log  : timestamp, symbol, strategy, timeframe, signal_type, entry_price, stop_loss,
-               target_1, target_2, confidence, claude_verdict, claude_reasoning, tv_rating, status
+               target_1, target_2, confidence, claude_verdict, claude_reasoning, composite_rating, status
 portfolio    : symbol, strategy, entry_price, quantity, stop_loss, target_1, target_2, entry_time, current_price
 trade_history: symbol, strategy, entry_price, exit_price, quantity, pnl, entry_time, exit_time, reason, signal_id
 
@@ -59,7 +59,7 @@ Market Pulse | Portfolio | Technical Chart | Live Signals | Backtesting | Watchl
 Auto-refresh 30 s during market hours. Sidebar: account summary, AI provider, quick actions.
 
 ## External Integrations
-yfinance (market data) | tradingview-ta (TA ratings) | Anthropic / OpenAI API (validation) | Telegram Bot API (notifications)
+yfinance (market data) | in-house composite TA (no external dep.) | Anthropic / OpenAI API (validation) | Telegram Bot API (notifications)
 
 ## Known Gaps / Improvement Opportunities
 - No feedback loop: trade outcomes never read back into signal generation or AI prompts

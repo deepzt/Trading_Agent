@@ -101,10 +101,10 @@ class ClaudeValidationAgent(BaseAgent):
             self.log_warning("No AI API key found — all signals will be REJECTED")
 
     def run(self, signals: List[Signal], sentiment_context: Optional[dict] = None,
-            tv_ratings: Optional[dict] = None, perf_context: str = "") -> List[Signal]:
+            composite_ratings: Optional[dict] = None, perf_context: str = "") -> List[Signal]:
         """Validate signals via AI provider. Returns signals with updated status and confidence."""
         validated = []
-        tv = tv_ratings or {}
+        cr = composite_ratings or {}
         for signal in signals:
             threshold = self._threshold_overrides.get(signal.strategy, self._min_confidence)
             if signal.confidence < threshold:
@@ -114,7 +114,7 @@ class ClaudeValidationAgent(BaseAgent):
                 validated.append(signal)
                 continue
 
-            result = self._validate_signal(signal, sentiment_context or {}, tv, perf_context)
+            result = self._validate_signal(signal, sentiment_context or {}, cr, perf_context)
             if result:
                 signal.claude_verdict = result.get("verdict", "REJECT")
                 signal.claude_reasoning = result.get("reasoning", "")
@@ -142,18 +142,18 @@ class ClaudeValidationAgent(BaseAgent):
         self.log_info(f"Validated {len(validated)} signals via {self._provider}: {approved} approved")
         return validated
 
-    def _validate_signal(self, signal: Signal, sentiment: dict, tv_ratings: dict,
+    def _validate_signal(self, signal: Signal, sentiment: dict, composite_ratings: dict,
                          perf_context: str = "") -> Optional[dict]:
         if self._provider == "none" or self._client is None:
             return None
 
-        user_message = self._build_prompt(signal, sentiment, tv_ratings, perf_context)
+        user_message = self._build_prompt(signal, sentiment, composite_ratings, perf_context)
 
         if self._provider == "anthropic":
             return self._call_anthropic(signal.symbol, user_message)
         return self._call_openai(signal.symbol, user_message)
 
-    def _build_prompt(self, signal: Signal, sentiment: dict, tv_ratings: dict,
+    def _build_prompt(self, signal: Signal, sentiment: dict, composite_ratings: dict,
                       perf_context: str = "") -> str:
         sym_sentiment = sentiment.get(signal.symbol, {})
         news_context = ""
@@ -171,8 +171,8 @@ class ClaudeValidationAgent(BaseAgent):
                 f"| India VIX: {market_context.get('vix', 'unknown')}"
             )
 
-        tv_rating = tv_ratings.get(signal.symbol, "UNKNOWN")
-        tv_note = f"\nTradingView independent TA rating (daily): {tv_rating}" if tv_rating != "UNKNOWN" else ""
+        composite_rating = composite_ratings.get(signal.symbol, "UNKNOWN")
+        composite_note = f"\nIn-house composite TA rating: {composite_rating}" if composite_rating != "UNKNOWN" else ""
 
         perf_note = f"\nHistorical performance context: {perf_context}" if perf_context else ""
 
@@ -188,7 +188,7 @@ class ClaudeValidationAgent(BaseAgent):
             f"Risk-Reward: {signal.risk_reward}x\n"
             f"Rules Confidence: {signal.confidence}/10\n"
             f"Signal Reasons: {', '.join(signal.reasons)}"
-            f"{market_note}{news_context}{tv_note}{perf_note}\n\n"
+            f"{market_note}{news_context}{composite_note}{perf_note}\n\n"
             f"Respond with JSON only."
         )
 

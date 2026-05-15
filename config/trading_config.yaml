@@ -26,6 +26,7 @@ strategies:
     max_price: 50000
     exit_by: "15:15"
     auto_close_eod: true            # Auto-close open intraday positions at 3:20 PM IST
+    max_entry_gap_pct: 0.02         # Skip trade if live price is >2% above planned entry
 
   swing:
     timeframe: "1d"
@@ -68,6 +69,11 @@ signals:
   max_signals_per_run: 10           # Cap signals generated per scan
   cooldown_hours: 4                 # Don't re-signal same stock for 4 hrs
 
+volatility_scaling:
+  enabled: true
+  baseline_atr_pct: 1.5             # Nifty50 average daily ATR as % of price (~1.5%)
+  # Scores scaled by min(baseline / current_atr_pct, 1.0) — never boosts, only penalises high-vol
+
 data:
   primary_source: "yfinance"        # "yfinance" or "jugaad"
   fallback_source: "yfinance"
@@ -91,3 +97,15 @@ openai:
 regime:
   vix_volatile_threshold: 18    # VIX >= 18 → VOLATILE (wider stops, reduced intraday)
   vix_crisis_threshold: 24      # VIX >= 24 → CRISIS (no intraday breakout signals)
+
+rbi_mpc:
+  blackout_days_before: 2       # Block swing/positional N trading days before decision
+  blackout_days_after: 2        # Block swing/positional N trading days after decision
+  # RBI MPC decision dates — update each year (announced at rbi.org.in)
+  decision_dates:
+    - "2026-02-07"
+    - "2026-04-09"
+    - "2026-06-06"
+    - "2026-08-07"
+    - "2026-10-09"
+    - "2026-12-04"

@@ -54,10 +54,12 @@ class PaperBroker(BaseBroker):
             _logger.info(f"Paper order filled: {signal.symbol} x{quantity} @ ₹{fill_price}")
         return order_id
 
-    def check_exits(self, live_prices: dict, ta_data: dict = None) -> list:
+    def check_exits(self, live_prices: dict, ta_data: dict = None,
+                    day_highs: dict = None, day_lows: dict = None) -> list:
         """
         Check open positions against live prices for SL/TP hits.
         ta_data: optional dict of {symbol: enriched DataFrame} used for T1 reversal detection.
+        day_highs/day_lows: optional dicts so T2 is detected even if price pulled back since touch.
         Returns list of closed trade dicts.
         """
         positions = self._portfolio.get_open_positions()
@@ -75,28 +77,33 @@ class PaperBroker(BaseBroker):
             t2 = pos["target_2"]
             signal_type = pos["signal_type"]
 
+            # Use day high/low to catch T2 hits that occurred between monitor ticks
+            d_high = (day_highs or {}).get(symbol, price)
+            d_low = (day_lows or {}).get(symbol, price)
+
             exit_price = None
             reason = None
 
             if signal_type == "BUY":
-                if price <= sl:
+                if d_low <= sl:
                     exit_price, reason = sl, "STOP_LOSS"
-                elif price >= t2:
+                elif d_high >= t2:
                     exit_price, reason = t2, "TARGET_2"
-                elif price >= t1:
+                elif d_high >= t1:
                     if self._is_reversal_at_t1(symbol, ta_data):
                         exit_price, reason = t1, "TARGET_1_REVERSAL"
                         _logger.info(f"{symbol}: reversal detected at T1 — booking profit @ ₹{t1:.2f}")
                     else:
                         entry = pos["entry_price"]
                         self._portfolio.update_stop_loss(trade_id, entry)
+                        _logger.info(f"{symbol}: T1 hit — SL trailed to breakeven @ ₹{entry:.2f}")
                 elif self._should_exit_on_indicators(symbol, pos.get("strategy"), ta_data):
                     exit_price, reason = price, "INDICATOR_EXIT"
                     _logger.info(f"{symbol}: indicator exit — EMA bearish + MACD negative @ ₹{price:.2f}")
             elif signal_type == "SELL":
-                if price >= sl:
+                if d_high >= sl:
                     exit_price, reason = sl, "STOP_LOSS"
-                elif price <= t2:
+                elif d_low <= t2:
                     exit_price, reason = t2, "TARGET_2"
 
             if exit_price and reason:
@@ -175,7 +182,13 @@ class PaperBroker(BaseBroker):
             if pos.get("strategy") != "intraday":
                 continue
             symbol = pos["symbol"]
-            price = live_prices.get(symbol) or pos["entry_price"]
+            price = live_prices.get(symbol)
+            if price is None:
+                _logger.error(
+                    f"EOD close SKIPPED for {symbol}: no live quote available. "
+                    "Position remains open — manual close required."
+                )
+                continue
             pnl = self._portfolio.close_position(pos["id"], price, "EOD_CLOSE")
             closed.append({"symbol": symbol, "reason": "EOD_CLOSE", "pnl": pnl, "exit_price": price})
             _logger.info(f"EOD auto-close: {symbol} @ ₹{price:.2f} | P&L ₹{pnl:.2f}")

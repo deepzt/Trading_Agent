@@ -23,7 +23,7 @@ from agents.risk_agent import RiskAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.signal_agent import SignalAgent
 from agents.technical_analysis_agent import TechnicalAnalysisAgent
-from agents.tradingview_ta_agent import TradingViewTAAgent
+from agents.tradingview_ta_agent import CompositeTAAgent
 from brokers.paper_broker import PaperBroker
 from monitoring.health import is_market_open, is_trading_day
 from monitoring.logger import get_logger
@@ -42,7 +42,7 @@ class TradingState(TypedDict):
     validated_signals: List[Any]
     approved_trades: List[Any]
     sentiment: Dict[str, Any]
-    tv_ratings: Dict[str, str]
+    composite_ratings: Dict[str, str]
     perf_context: str
     tuning_actions: List[Any]
     portfolio_stats: Dict[str, Any]
@@ -51,6 +51,7 @@ class TradingState(TypedDict):
     regime: str
     earnings_blackout_symbols: List[str]
     momentum_ranks: Dict[str, float]
+    active_strategies: List[str]
 
 
 # ── Node functions (each agent step) ──────────────────────────────────────
@@ -78,11 +79,9 @@ def fetch_sentiment(state: TradingState) -> TradingState:
     return state
 
 
-def fetch_tv_ratings(state: TradingState) -> TradingState:
-    _logger.info("Step 3b: Fetching TradingView TA ratings")
-    agent = TradingViewTAAgent()
-    symbols = list(state["enriched_data"].keys())[:20]
-    state["tv_ratings"] = agent.run(symbols)
+def fetch_composite_ratings(state: TradingState) -> TradingState:
+    _logger.info("Step 3b: Computing in-house composite TA ratings")
+    state["composite_ratings"] = CompositeTAAgent().run(state["enriched_data"])
     return state
 
 
@@ -133,16 +132,52 @@ def compute_performance(state: TradingState) -> TradingState:
     return state
 
 
+def _is_rbi_mpc_blackout() -> bool:
+    """Return True if today falls within the configured blackout window around an RBI MPC date."""
+    import yaml
+    from pathlib import Path
+    from datetime import date, timedelta
+    cfg = yaml.safe_load((Path(__file__).parent.parent / "config" / "trading_config.yaml").read_text())
+    mpc_cfg = cfg.get("rbi_mpc", {})
+    decision_dates = mpc_cfg.get("decision_dates", [])
+    days_before = mpc_cfg.get("blackout_days_before", 2)
+    days_after = mpc_cfg.get("blackout_days_after", 2)
+    today = date.today()
+    for ds in decision_dates:
+        try:
+            d = date.fromisoformat(ds)
+            if (d - timedelta(days=days_before)) <= today <= (d + timedelta(days=days_after)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def generate_signals(state: TradingState) -> TradingState:
     _logger.info("Step 4b: Generating signals")
     agent = SignalAgent()
+
+    active_strategies = state.get("active_strategies") or None  # None → use config default
+    if _is_rbi_mpc_blackout():
+        _logger.warning("RBI MPC blackout window — swing and positional signals suppressed")
+        cfg_strategies = _get_active_strategies()
+        active_strategies = [s for s in cfg_strategies if s == "intraday"]
+
     state["signals"] = agent.run(
         state["enriched_data"],
-        tv_ratings=state.get("tv_ratings", {}),
+        active_strategies=active_strategies,
+        composite_ratings=state.get("composite_ratings", {}),
         regime=state.get("regime", "TRENDING"),
         momentum_ranks=state.get("momentum_ranks", {}),
     )
     return state
+
+
+def _get_active_strategies() -> list:
+    import yaml
+    from pathlib import Path
+    cfg = yaml.safe_load((Path(__file__).parent.parent / "config" / "trading_config.yaml").read_text())
+    return cfg.get("strategies", {}).get("active", ["swing", "intraday", "positional"])
 
 
 def validate_with_claude(state: TradingState) -> TradingState:
@@ -151,7 +186,7 @@ def validate_with_claude(state: TradingState) -> TradingState:
     state["validated_signals"] = agent.run(
         state["signals"],
         state["sentiment"],
-        state.get("tv_ratings", {}),
+        state.get("composite_ratings", {}),
         state.get("perf_context", ""),
     )
     return state
@@ -180,10 +215,55 @@ def execute_paper_trades(state: TradingState) -> TradingState:
     _logger.info("Step 7: Executing paper trades")
     portfolio = PortfolioAgent()
     broker = PaperBroker(portfolio)
+    data_agent = DataAgent()
+
+    import yaml
+    from pathlib import Path
+    _tcfg = yaml.safe_load((Path(__file__).parent.parent / "config" / "trading_config.yaml").read_text())
+    _rcfg = yaml.safe_load((Path(__file__).parent.parent / "config" / "risk_config.yaml").read_text())
+    max_gap_pct = _tcfg.get("strategies", {}).get("intraday", {}).get("max_entry_gap_pct", 0.02)
+    max_position_pct = _rcfg.get("position_sizing", {}).get("max_position_pct", 10.0) / 100
+
+    account_size = float(os.getenv("ACCOUNT_SIZE", "100000"))
+    try:
+        account_size = portfolio.get_available_cash()
+    except Exception:
+        pass
 
     for trade in state["approved_trades"]:
         signal = trade["signal"]
         qty = trade["quantity"]
+
+        # Fetch live price to use as actual fill price (signal.entry_price is yesterday's close)
+        quote = data_agent.get_live_quote(signal.symbol)
+        if quote:
+            live_price = quote["last_price"]
+            gap = (live_price - signal.entry_price) / signal.entry_price
+            # For intraday breakout signals, reject if price has already gapped up too far
+            if signal.strategy == "intraday" and gap > max_gap_pct:
+                _logger.warning(
+                    f"Skipping {signal.symbol} intraday — live ₹{live_price:.2f} is "
+                    f"{gap*100:.1f}% above planned entry ₹{signal.entry_price:.2f} (max {max_gap_pct*100:.0f}%)"
+                )
+                continue
+            # Shift SL and targets by the same delta to preserve ATR-based risk/reward
+            price_shift = live_price - signal.entry_price
+            signal.entry_price = round(live_price, 2)
+            signal.stop_loss = round(signal.stop_loss + price_shift, 2)
+            signal.target_1 = round(signal.target_1 + price_shift, 2)
+            signal.target_2 = round(signal.target_2 + price_shift, 2)
+
+            # Re-apply max_position_pct cap against live price (quantity was sized on stale price)
+            max_qty_by_value = int((account_size * max_position_pct) / signal.entry_price)
+            if qty > max_qty_by_value:
+                _logger.info(
+                    f"{signal.symbol}: qty capped {qty}→{max_qty_by_value} after live price update"
+                )
+                qty = max_qty_by_value
+            if qty < 1:
+                _logger.warning(f"Skipping {signal.symbol}: qty=0 after live price cap")
+                continue
+
         broker.execute_signal(signal, qty)
 
     state["portfolio_stats"] = portfolio.get_performance_stats()
@@ -230,7 +310,7 @@ def build_graph() -> Any:
     workflow.add_node("run_ta", run_technical_analysis)
     workflow.add_node("fetch_sentiment", fetch_sentiment)
     workflow.add_node("detect_regime", detect_regime)
-    workflow.add_node("fetch_tv_ratings", fetch_tv_ratings)
+    workflow.add_node("fetch_composite_ratings", fetch_composite_ratings)
     workflow.add_node("check_earnings", check_earnings)
     workflow.add_node("compute_performance", compute_performance)
     workflow.add_node("generate_signals", generate_signals)
@@ -244,8 +324,8 @@ def build_graph() -> Any:
     workflow.add_edge("fetch_data", "run_ta")
     workflow.add_edge("run_ta", "fetch_sentiment")
     workflow.add_edge("fetch_sentiment", "detect_regime")
-    workflow.add_edge("detect_regime", "fetch_tv_ratings")
-    workflow.add_edge("fetch_tv_ratings", "check_earnings")
+    workflow.add_edge("detect_regime", "fetch_composite_ratings")
+    workflow.add_edge("fetch_composite_ratings", "check_earnings")
     workflow.add_edge("check_earnings", "compute_performance")
     workflow.add_edge("compute_performance", "generate_signals")
     workflow.add_edge("generate_signals", "validate_claude")
@@ -281,23 +361,28 @@ class TradingScheduler:
         portfolio = PortfolioAgent()
         broker = PaperBroker(portfolio)
 
+        # Fetch prices for all open position symbols (not just watchlist[:20])
+        open_syms = list({p["symbol"] for p in portfolio.get_open_positions()})
         live_prices = {}
-        for sym in self._symbols[:20]:
+        day_highs = {}
+        day_lows = {}
+        for sym in open_syms:
             q = data_agent.get_live_quote(sym)
             if q:
                 live_prices[sym] = q["last_price"]
+                day_highs[sym] = q["day_high"]
+                day_lows[sym] = q["day_low"]
 
         # Fetch TA data for open position symbols only (for T1 reversal detection)
         ta_data = {}
         try:
-            open_syms = list({p["symbol"] for p in portfolio.get_open_positions()})
             if open_syms:
                 raw = data_agent.run(open_syms, timeframe="1d", days=30)
                 ta_data = TechnicalAnalysisAgent().run(raw)
         except Exception as e:
             _logger.warning(f"T1 reversal TA fetch failed: {e} — reversal check skipped")
 
-        closed = broker.check_exits(live_prices, ta_data=ta_data)
+        closed = broker.check_exits(live_prices, ta_data=ta_data, day_highs=day_highs, day_lows=day_lows)
         if closed:
             notif = NotificationAgent()
             for trade in closed:
@@ -357,12 +442,13 @@ class TradingScheduler:
             "symbols": self._symbols,
             "raw_data": {}, "enriched_data": {},
             "signals": [], "validated_signals": [],
-            "approved_trades": [], "sentiment": {}, "tv_ratings": {},
+            "approved_trades": [], "sentiment": {}, "composite_ratings": {},
             "perf_context": "", "tuning_actions": [],
             "portfolio_stats": {}, "closed_today": [], "errors": [],
             "regime": "TRENDING",
             "earnings_blackout_symbols": [],
             "momentum_ranks": {},
+            "active_strategies": [],
         }
         try:
             self._graph.invoke(initial_state)

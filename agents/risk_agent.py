@@ -40,20 +40,30 @@ class RiskAgent(BaseAgent):
             self.log_warning("Max drawdown exceeded — blocking all signals")
             return []
 
+        if self._daily_trade_limit_reached():
+            self.log_warning("Daily trade limit reached — blocking all signals")
+            return []
+
         open_positions = self._get_open_position_count()
         max_pos = self._cfg["portfolio_limits"]["max_open_positions"]
 
         approved = []
+        approved_symbols: set = set()  # track in-scan approvals — DB not updated until execute step
         for signal in signals:
             if open_positions >= max_pos:
                 self.log_info(f"Max positions ({max_pos}) reached, skipping {signal.symbol}")
                 break
+
+            if signal.symbol in approved_symbols:
+                self.log_info(f"REJECTED {signal.symbol}: already approved in this scan", symbol=signal.symbol)
+                continue
 
             ok, reason = self._check_signal(signal, open_positions, context)
             if ok:
                 qty = self._calculate_quantity(signal)
                 if qty >= 1:
                     approved.append((signal, qty))
+                    approved_symbols.add(signal.symbol)
                     open_positions += 1
                     self.log_info(f"APPROVED {signal.symbol} qty={qty} conf={signal.confidence}", symbol=signal.symbol)
             else:
@@ -148,6 +158,17 @@ class RiskAgent(BaseAgent):
             daily_pnl_pct = stats.get("daily_pnl_pct", 0)
             max_loss = self._cfg["daily_limits"]["max_daily_loss_pct"]
             return daily_pnl_pct < -max_loss
+        except Exception:
+            return False
+
+    def _daily_trade_limit_reached(self) -> bool:
+        if self._portfolio_agent is None:
+            return False
+        try:
+            stats = self._portfolio_agent.get_daily_stats()
+            trades_today = stats.get("trades_today", 0)
+            max_trades = self._cfg["daily_limits"]["max_daily_trades"]
+            return trades_today >= max_trades
         except Exception:
             return False
 

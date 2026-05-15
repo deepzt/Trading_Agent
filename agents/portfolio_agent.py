@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS signals_log (
     claude_reasoning TEXT,
     timestamp TEXT,
     status TEXT,
-    tv_rating TEXT,
+    composite_rating TEXT,
     entry_price REAL,
     stop_loss REAL,
     target_1 REAL,
@@ -78,9 +78,14 @@ class PortfolioAgent(BaseAgent):
                 stmt = stmt.strip()
                 if stmt:
                     conn.execute(text(stmt))
+            # Rename legacy tv_rating column to composite_rating
+            try:
+                conn.execute(text("ALTER TABLE signals_log RENAME COLUMN tv_rating TO composite_rating"))
+            except Exception:
+                pass  # Already renamed or doesn't exist
             # Migrate existing DB — add columns that may be absent in older DBs
             _new_cols = [
-                ("tv_rating", "TEXT"),
+                ("composite_rating", "TEXT"),
                 ("entry_price", "REAL"),
                 ("stop_loss", "REAL"),
                 ("target_1", "REAL"),
@@ -139,6 +144,19 @@ class PortfolioAgent(BaseAgent):
 
     def update_stop_loss(self, trade_id: str, new_sl: float):
         with self._engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT signal_type, stop_loss FROM trades WHERE id=:id AND status='OPEN'"),
+                {"id": trade_id},
+            ).fetchone()
+            if not row:
+                return
+            # Never widen the stop — BUY SL can only move up, SELL SL can only move down
+            if row.signal_type == "BUY" and new_sl < row.stop_loss:
+                self.log_warning(f"Rejected SL update for {trade_id}: would widen BUY stop {row.stop_loss} → {new_sl}")
+                return
+            if row.signal_type == "SELL" and new_sl > row.stop_loss:
+                self.log_warning(f"Rejected SL update for {trade_id}: would widen SELL stop {row.stop_loss} → {new_sl}")
+                return
             conn.execute(text("UPDATE trades SET stop_loss=:sl WHERE id=:id"),
                          {"sl": new_sl, "id": trade_id})
             conn.commit()
@@ -149,6 +167,15 @@ class PortfolioAgent(BaseAgent):
         with self._engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM trades WHERE status='OPEN'")).fetchall()
         return [dict(r._mapping) for r in rows]
+
+    def get_available_cash(self) -> float:
+        """Equity minus capital tied up in open positions (unrealized exposure deducted)."""
+        initial = float(os.getenv("ACCOUNT_SIZE", "100000"))
+        stats = self.get_performance_stats()
+        equity = stats.get("current_equity", initial)
+        open_positions = self.get_open_positions()
+        invested = sum(p["entry_price"] * p["quantity"] for p in open_positions)
+        return max(equity - invested, 0.0)
 
     def get_trade_history(self, limit: int = 100) -> pd.DataFrame:
         with self._engine.connect() as conn:
@@ -224,7 +251,7 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("""
                 INSERT OR REPLACE INTO signals_log
                     (id, symbol, strategy, signal_type, confidence, claude_verdict,
-                     claude_reasoning, timestamp, status, tv_rating,
+                     claude_reasoning, timestamp, status, composite_rating,
                      entry_price, stop_loss, target_1, target_2,
                      risk_reward, sl_pct, timeframe)
                 VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :tvr,
@@ -239,7 +266,7 @@ class PortfolioAgent(BaseAgent):
                 "cr": signal_dict.get("claude_reasoning"),
                 "ts": signal_dict.get("timestamp"),
                 "st": signal_dict.get("status"),
-                "tvr": signal_dict.get("tv_rating", "UNKNOWN"),
+                "tvr": signal_dict.get("composite_rating", "UNKNOWN"),
                 "ep": signal_dict.get("entry_price"),
                 "sl": signal_dict.get("stop_loss"),
                 "t1": signal_dict.get("target_1"),

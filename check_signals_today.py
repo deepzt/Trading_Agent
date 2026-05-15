@@ -11,7 +11,7 @@ conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
 cur.execute(
-    "SELECT symbol, strategy, signal_type, confidence, claude_verdict, status, tv_rating, "
+    "SELECT symbol, strategy, signal_type, confidence, claude_verdict, status, composite_rating, "
     "entry_price, stop_loss, target_1, target_2, timestamp "
     "FROM signals_log WHERE timestamp LIKE ? ORDER BY timestamp DESC",
     (today + "%",)
@@ -28,7 +28,7 @@ for r in rows:
         f"| conf={d['confidence']}",
         f"| verdict={d['claude_verdict']}",
         f"| status={d['status']}",
-        f"| TV={d['tv_rating']}",
+        f"| TA={d['composite_rating']}",
         f"| entry={d['entry_price']}",
     )
 

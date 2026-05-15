@@ -5,8 +5,9 @@ Runs all active strategy screeners and scores each signal 0-10.
 
 from __future__ import annotations
 
+import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -14,12 +15,13 @@ import pandas as pd
 import pytz
 import yaml
 from pathlib import Path
+from sqlalchemy import create_engine, text
 
 from agents.base_agent import BaseAgent
 
 _IST = pytz.timezone("Asia/Kolkata")
 
-_TV_ADJ: Dict[str, float] = {
+_COMPOSITE_ADJ: Dict[str, float] = {
     "STRONG_BUY": 1.5, "BUY": 1.0, "NEUTRAL": 0.0,
     "SELL": -1.0, "STRONG_SELL": -1.5,
 }
@@ -51,7 +53,7 @@ class Signal:
         self.status = "PENDING"              # PENDING → APPROVED / REJECTED / EXECUTED
         self.claude_verdict = None
         self.claude_reasoning = None
-        self.tv_rating: str = "UNKNOWN"
+        self.composite_rating: str = "UNKNOWN"
 
         # Computed
         sl_dist = abs(entry_price - stop_loss)
@@ -78,7 +80,7 @@ class Signal:
             "status": self.status,
             "claude_verdict": self.claude_verdict,
             "claude_reasoning": self.claude_reasoning,
-            "tv_rating": self.tv_rating,
+            "composite_rating": self.composite_rating,
         }
 
     def format_alert(self) -> str:
@@ -102,25 +104,33 @@ class SignalAgent(BaseAgent):
         risk_path = Path(__file__).parent.parent / "config" / "risk_config.yaml"
         with open(risk_path) as f:
             self._risk = yaml.safe_load(f)
+        db_url = os.getenv("DATABASE_URL", "sqlite:///data/trading.db")
+        self._engine = create_engine(db_url, echo=False)
 
     def run(self, enriched_data: Dict[str, pd.DataFrame], active_strategies: Optional[List[str]] = None,
-            tv_ratings: Optional[Dict[str, str]] = None, regime: str = "TRENDING",
+            composite_ratings: Optional[Dict[str, str]] = None, regime: str = "TRENDING",
             momentum_ranks: Optional[Dict[str, float]] = None) -> List[Signal]:
         """Screen all symbols and return list of signals above confidence threshold."""
         if active_strategies is None:
             active_strategies = self._cfg["strategies"]["active"]
-        tv = tv_ratings or {}
+        cr = composite_ratings or {}
         ranks = momentum_ranks or {}
 
         if regime == "CRISIS":
             self.log_info("Regime CRISIS — intraday signals suppressed this scan")
 
+        cooldown_hours = self._cfg["signals"].get("cooldown_hours", 4)
+        recent_symbols = self._get_recent_signal_symbols(cooldown_hours)
+
         signals: List[Signal] = []
         for symbol, df in enriched_data.items():
             if df is None or len(df) < 50:
                 continue
+            if symbol in recent_symbols:
+                self.log_info(f"Cooldown active for {symbol} — skipping (signalled within {cooldown_hours}h)")
+                continue
             for strategy in active_strategies:
-                sig = self._screen(symbol, df, strategy, tv, regime, ranks)
+                sig = self._screen(symbol, df, strategy, cr, regime, ranks)
                 if sig:
                     signals.append(sig)
 
@@ -132,22 +142,48 @@ class SignalAgent(BaseAgent):
         self.log_info(f"Generated {len(signals)} signals from {len(enriched_data)} symbols (regime={regime})")
         return signals
 
-    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str, tv_ratings: dict,
+    def _apply_vol_scaling(self, score: float, atr: float, entry: float) -> float:
+        """Scale score down when ATR% exceeds baseline — high-vol stocks get lower confidence."""
+        vs_cfg = self._cfg.get("volatility_scaling", {})
+        if not vs_cfg.get("enabled", True):
+            return score
+        if entry <= 0 or atr <= 0:
+            return score
+        baseline = vs_cfg.get("baseline_atr_pct", 1.5) / 100
+        current_atr_pct = atr / entry
+        vol_scale = min(baseline / current_atr_pct, 1.0)
+        return round(score * vol_scale, 2)
+
+    def _get_recent_signal_symbols(self, hours: int) -> set:
+        """Return symbols that had a signal logged within the last `hours` hours."""
+        cutoff = (datetime.now(_IST) - timedelta(hours=hours)).isoformat()
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT DISTINCT symbol FROM signals_log WHERE timestamp >= :cutoff"),
+                    {"cutoff": cutoff},
+                ).fetchall()
+            return {r[0] for r in rows}
+        except Exception as e:
+            self.log_warning(f"Cooldown check failed: {e} — proceeding without cooldown")
+            return set()
+
+    def _screen(self, symbol: str, df: pd.DataFrame, strategy: str, composite_ratings: dict,
                 regime: str = "TRENDING", momentum_ranks: dict = None) -> Optional[Signal]:
         try:
             if strategy == "swing":
-                return self._swing_signal(symbol, df, tv_ratings, regime)
+                return self._swing_signal(symbol, df, composite_ratings, regime)
             elif strategy == "intraday":
-                return self._intraday_signal(symbol, df, tv_ratings, regime)
+                return self._intraday_signal(symbol, df, composite_ratings, regime)
             elif strategy == "positional":
-                return self._positional_signal(symbol, df, tv_ratings, momentum_ranks)
+                return self._positional_signal(symbol, df, composite_ratings, momentum_ranks)
         except Exception as e:
             self.log_error(f"Signal error {symbol}/{strategy}: {e}")
         return None
 
     # ── Strategy screeners ─────────────────────────────────────────────────
 
-    def _swing_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
+    def _swing_signal(self, symbol: str, df: pd.DataFrame, composite_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
         """EMA 9/21 crossover + RSI in sweet spot + above EMA50."""
         cfg = self._cfg["strategies"]["swing"]
         row = df.iloc[-1]
@@ -179,7 +215,7 @@ class SignalAgent(BaseAgent):
             score += 1.5
             reasons.append("Price above EMA50")
 
-        # 4. Volume confirmation
+        # 4. Volume confirmation — low-volume momentum persists longer (Lee & Swaminathan 2000)
         vol_ratio = row.get("volume_ratio", 1.0)
         if vol_ratio and vol_ratio >= 1.5:
             score += 1.5
@@ -187,6 +223,9 @@ class SignalAgent(BaseAgent):
         elif vol_ratio and vol_ratio >= 1.2:
             score += 0.5
             reasons.append(f"Volume +{(vol_ratio-1)*100:.0f}%")
+        elif vol_ratio and 0.5 <= vol_ratio <= 0.9:
+            score += 0.75
+            reasons.append(f"Low-volume momentum (persistent, {vol_ratio:.1f}x)")
 
         # 5. ADX trend strength
         adx = row.get("ADX_14")
@@ -199,17 +238,19 @@ class SignalAgent(BaseAgent):
             score += 0.5
             reasons.append("Above 200 EMA")
 
-        # 7. TradingView independent cross-validation
-        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
-        score += _TV_ADJ.get(tv_rating, 0.0)
-        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
-            reasons.append(f"TradingView: {tv_rating}")
+        # 7. Composite TA cross-validation
+        composite_rating = composite_ratings.get(symbol, "UNKNOWN")
+        score += _COMPOSITE_ADJ.get(composite_rating, 0.0)
+        if composite_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"CompositeTA: {composite_rating}")
 
         if score < 5.0 or not reasons:
             return None
 
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.02)
+        score = self._apply_vol_scaling(score, atr, entry)
+
         atr_mult = self._risk["stop_loss"]["atr_multiplier"]
         if regime == "VOLATILE":
             atr_mult = round(atr_mult * 1.33, 2)  # Wider stop in volatile markets
@@ -225,10 +266,10 @@ class SignalAgent(BaseAgent):
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="1d"
         )
-        sig.tv_rating = tv_rating
+        sig.composite_rating = composite_rating
         return sig
 
-    def _intraday_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
+    def _intraday_signal(self, symbol: str, df: pd.DataFrame, composite_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
         """Breakout above previous day's high with volume surge."""
         if regime == "CRISIS":
             return None  # No intraday breakout signals during market crisis
@@ -277,14 +318,15 @@ class SignalAgent(BaseAgent):
             score += 1.0
             reasons.append("EMA aligned bullish")
 
-        # 6. TradingView independent cross-validation
-        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
-        score += _TV_ADJ.get(tv_rating, 0.0)
-        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
-            reasons.append(f"TradingView: {tv_rating}")
+        # 6. Composite TA cross-validation
+        composite_rating = composite_ratings.get(symbol, "UNKNOWN")
+        score += _COMPOSITE_ADJ.get(composite_rating, 0.0)
+        if composite_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"CompositeTA: {composite_rating}")
 
         entry = close
         atr = row.get("ATRr_14", entry * 0.015)
+        score = self._apply_vol_scaling(score, atr, entry)
         atr_mult = 1.33 if regime == "VOLATILE" else 1.0
         sl_dist = max(atr * atr_mult, (entry - float(row["low"])) * 1.1)
 
@@ -298,10 +340,10 @@ class SignalAgent(BaseAgent):
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="15m"
         )
-        sig.tv_rating = tv_rating
+        sig.composite_rating = composite_rating
         return sig
 
-    def _positional_signal(self, symbol: str, df: pd.DataFrame, tv_ratings: dict,
+    def _positional_signal(self, symbol: str, df: pd.DataFrame, composite_ratings: dict,
                            momentum_ranks: dict = None) -> Optional[Signal]:
         """Weekly trend following — price above 200 EMA, strong momentum, top sector rank."""
         cfg = self._cfg["strategies"]["positional"]
@@ -355,14 +397,24 @@ class SignalAgent(BaseAgent):
             score += 1.0
             reasons.append(f"ADX {adx:.0f}")
 
-        # 6. TradingView independent cross-validation
-        tv_rating = tv_ratings.get(symbol, "UNKNOWN")
-        score += _TV_ADJ.get(tv_rating, 0.0)
-        if tv_rating not in ("UNKNOWN", "NEUTRAL"):
-            reasons.append(f"TradingView: {tv_rating}")
+        # 6. Volume — low-volume rally = stealthy accumulation (persistent, Lee & Swaminathan 2000)
+        vol_ratio = row.get("volume_ratio", 1.0)
+        if vol_ratio and 0.5 <= vol_ratio <= 0.9:
+            score += 0.75
+            reasons.append(f"Low-volume accumulation ({vol_ratio:.1f}x avg — persistent momentum)")
+        elif vol_ratio and vol_ratio >= 2.0:
+            score -= 0.5  # High-volume surge on weekly = likely reverting, not trending
+            reasons.append(f"High-volume caution ({vol_ratio:.1f}x)")
+
+        # 7. Composite TA cross-validation
+        composite_rating = composite_ratings.get(symbol, "UNKNOWN")
+        score += _COMPOSITE_ADJ.get(composite_rating, 0.0)
+        if composite_rating not in ("UNKNOWN", "NEUTRAL"):
+            reasons.append(f"CompositeTA: {composite_rating}")
 
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.025)
+        score = self._apply_vol_scaling(score, atr, entry)
         sl_dist = atr * 2.0  # Wider stop for positional
 
         stop_loss = entry - sl_dist
@@ -375,5 +427,5 @@ class SignalAgent(BaseAgent):
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="1wk"
         )
-        sig.tv_rating = tv_rating
+        sig.composite_rating = composite_rating
         return sig

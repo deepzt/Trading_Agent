@@ -343,13 +343,13 @@ def render_signal_card(sig: dict):
     t2 = sig.get("target_2", 0)
     reasoning = sig.get("claude_reasoning") or ""
 
-    tv_rating = sig.get("tv_rating") or ""
-    _tv_colors = {"STRONG_BUY": "#3fb950", "BUY": "#58c94b", "SELL": "#f85149", "STRONG_SELL": "#da3633", "NEUTRAL": "#8b949e"}
-    tv_color = _tv_colors.get(tv_rating, "")
-    tv_badge = (
-        f'<span style="background:{tv_color}22; color:{tv_color}; border:1px solid {tv_color}; '
-        f'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">TV: {tv_rating}</span>'
-        if tv_rating and tv_rating not in ("UNKNOWN", "") else ""
+    composite_rating = sig.get("composite_rating") or ""
+    _composite_colors = {"STRONG_BUY": "#3fb950", "BUY": "#58c94b", "SELL": "#f85149", "STRONG_SELL": "#da3633", "NEUTRAL": "#8b949e"}
+    composite_color = _composite_colors.get(composite_rating, "")
+    composite_badge = (
+        f'<span style="background:{composite_color}22; color:{composite_color}; border:1px solid {composite_color}; '
+        f'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">TA: {composite_rating}</span>'
+        if composite_rating and composite_rating not in ("UNKNOWN", "") else ""
     )
     blackout_badge = (
         '<span style="background:#d2992222; color:#d29922; border:1px solid #d29922; '
@@ -362,7 +362,7 @@ def render_signal_card(sig: dict):
         <div style="display:flex; justify-content:space-between; align-items:start;">
             <div>
                 <span class="signal-symbol">{'🟢' if is_buy else '🔴'} {sig.get('symbol','')}</span>
-                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{tv_badge}{blackout_badge}
+                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{composite_badge}{blackout_badge}
             </div>
             <span style="color:#8b949e; font-size:0.72rem;">{str(sig.get('timestamp',''))[:19]}</span>
         </div>

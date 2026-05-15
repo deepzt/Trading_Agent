@@ -1,25 +1,32 @@
 """
-Fetches TradingView's aggregated TA ratings for NSE symbols via tradingview-ta.
-Uses get_multiple_analysis() to batch all symbols in one HTTP request instead of
-one request per symbol (which triggers 429s on 50-symbol watchlists).
-Ratings are cached for 60 minutes — TV daily ratings don't change intraday.
+In-house composite TA score replacing TradingView's aggregated ratings.
+Computes a 0–10 score from already-computed indicators in the enriched DataFrames,
+then maps to the same 5-level labels (STRONG_BUY / BUY / NEUTRAL / SELL / STRONG_SELL)
+that SignalAgent uses for confidence adjustment.
+
+Components and weights:
+  1. RSI zone              (max ±1.5) — ideal bullish 55-70, penalise extremes
+  2. MACD histogram        (max ±1.5) — direction (±1) + momentum trend (±0.5)
+  3. EMA alignment         (max ±1.5) — price > EMA9 > EMA21
+  4. Above EMA 200         (max ±1.0) — primary trend filter
+  5. ADX directional       (max ±1.0) — DI+ vs DI- when ADX ≥ 20
+  6. OBV slope             (max ±1.0) — 5-bar accumulation/distribution
+  7. Bollinger Band pct    (max ±0.5) — position within bands
+  8. Above rolling VWAP    (max ±0.5) — 20-bar VWAP
+  Max raw = ±8.5; normalised to 0–10.
 """
 
 from __future__ import annotations
 
-import time
-from typing import Dict, List
+from typing import Dict
+
+import numpy as np
+import pandas as pd
 
 from agents.base_agent import BaseAgent
 
-try:
-    from tradingview_ta import get_multiple_analysis, Interval
-    _TV_AVAILABLE = True
-except ImportError:
-    _TV_AVAILABLE = False
-
-# Confidence score adjustment per TV rating
-TV_SCORE_ADJ: Dict[str, float] = {
+# Confidence score adjustment — unchanged so SignalAgent needs no edits
+COMPOSITE_SCORE_ADJ: Dict[str, float] = {
     "STRONG_BUY": 1.5,
     "BUY": 1.0,
     "NEUTRAL": 0.0,
@@ -28,57 +35,122 @@ TV_SCORE_ADJ: Dict[str, float] = {
     "UNKNOWN": 0.0,
 }
 
-_CACHE_TTL = 3600  # seconds — daily TV ratings don't change every 15 min
+# Normalised score (0–10) → label
+_SCORE_THRESHOLDS = [
+    (7.5, "STRONG_BUY"),
+    (6.0, "BUY"),
+    (4.0, "NEUTRAL"),
+    (2.5, "SELL"),
+    (0.0, "STRONG_SELL"),
+]
+
+_MAX_RAW = 8.5
+_RANGE = 2 * _MAX_RAW  # 17.0
 
 
-class TradingViewTAAgent(BaseAgent):
+class CompositeTAAgent(BaseAgent):
+    """Computes in-house composite TA score from enriched indicator DataFrames."""
+
     def __init__(self):
-        super().__init__("TVRatings")
-        self._cache: Dict[str, str] = {}
-        self._cache_ts: float = 0.0
+        super().__init__("CompositeTA")
 
-    def run(self, symbols: List[str]) -> Dict[str, str]:
-        """Returns {symbol: rating} for each symbol. Never raises."""
-        if not _TV_AVAILABLE:
-            self.log_warning("tradingview-ta not installed — TV ratings skipped")
-            return {s: "UNKNOWN" for s in symbols}
-
-        if time.time() - self._cache_ts < _CACHE_TTL and self._cache:
-            self.log_info(f"TV ratings: served {len(symbols)} symbols from cache")
-            return {s: self._cache.get(s, "UNKNOWN") for s in symbols}
-
-        ratings = self._fetch_all(symbols)
-        self._cache = ratings
-        self._cache_ts = time.time()
+    def run(self, enriched_data: Dict[str, pd.DataFrame]) -> Dict[str, str]:
+        """Return {symbol: label} for every symbol in enriched_data."""
+        ratings: Dict[str, str] = {}
+        for symbol, df in enriched_data.items():
+            if df is None or df.empty:
+                ratings[symbol] = "UNKNOWN"
+                continue
+            try:
+                row = df.iloc[-1]
+                raw = self._score_row(row)
+                norm = (raw + _MAX_RAW) / _RANGE * 10.0
+                norm = max(0.0, min(10.0, norm))
+                ratings[symbol] = _to_label(norm)
+            except Exception as e:
+                self.log_warning(f"{symbol}: composite score failed — {e}")
+                ratings[symbol] = "UNKNOWN"
 
         bullish = sum(1 for r in ratings.values() if r in ("BUY", "STRONG_BUY"))
-        self.log_info(f"TV ratings: {len(ratings)} symbols fetched, {bullish} bullish")
+        self.log_info(f"CompositeTA: scored {len(ratings)} symbols, {bullish} bullish")
         return ratings
 
-    def _fetch_all(self, symbols: List[str], _retries: int = 2) -> Dict[str, str]:
-        tv_symbols = [f"NSE:{s}" for s in symbols]
-        for attempt in range(_retries + 1):
-            try:
-                results = get_multiple_analysis(
-                    screener="india",
-                    interval=Interval.INTERVAL_1_DAY,
-                    symbols=tv_symbols,
-                )
-                ratings: Dict[str, str] = {}
-                for s in symbols:
-                    analysis = results.get(f"NSE:{s}")
-                    if analysis:
-                        ratings[s] = analysis.summary.get("RECOMMENDATION", "UNKNOWN")
-                    else:
-                        ratings[s] = "UNKNOWN"
-                return ratings
-            except Exception as e:
-                msg = str(e)
-                if "429" in msg and attempt < _retries:
-                    wait = 20 * (attempt + 1)
-                    self.log_warning(f"TV bulk 429, retrying in {wait}s (attempt {attempt + 1}/{_retries})")
-                    time.sleep(wait)
-                else:
-                    self.log_warning(f"TV bulk fetch failed: {e} — all symbols set to UNKNOWN")
-                    return {s: "UNKNOWN" for s in symbols}
-        return {s: "UNKNOWN" for s in symbols}
+    def _score_row(self, row: pd.Series) -> float:
+        raw = 0.0
+
+        # 1. RSI zone (max ±1.5)
+        rsi = row.get("RSI_14")
+        if _valid(rsi):
+            if 55 <= rsi <= 70:
+                raw += 1.5
+            elif rsi > 70:
+                raw += 0.5   # overbought — reduced bonus
+            elif 45 < rsi < 55:
+                raw += 0.25  # mild momentum
+            elif 30 <= rsi <= 45:
+                raw -= 1.0
+            else:
+                raw -= 1.5   # rsi < 30 — oversold/bearish trend
+
+        # 2. MACD histogram direction + momentum (max ±1.5)
+        macdh = row.get("MACDh_12_26_9")
+        macdh_prev = row.get("MACDh_prev")
+        if _valid(macdh):
+            raw += 1.0 if macdh > 0 else -1.0
+            if _valid(macdh_prev):
+                raw += 0.5 if macdh > macdh_prev else -0.5
+
+        # 3. EMA alignment (max ±1.5)
+        if row.get("ema_bullish_align"):
+            raw += 1.5
+        elif row.get("ema_bearish_align"):
+            raw -= 1.5
+
+        # 4. Above EMA 200 (max ±1.0)
+        above_200 = row.get("above_ema200")
+        if _valid(above_200):
+            raw += 1.0 if above_200 else -1.0
+
+        # 5. ADX directional strength (max ±1.0)
+        adx = row.get("ADX_14")
+        dmp = row.get("DMP_14")
+        dmn = row.get("DMN_14")
+        if _valid(adx) and _valid(dmp) and _valid(dmn) and adx >= 20:
+            raw += 1.0 if dmp > dmn else -1.0
+
+        # 6. OBV slope (max ±1.0)
+        obv_slope = row.get("OBV_slope")
+        if _valid(obv_slope):
+            raw += 1.0 if obv_slope > 0 else -1.0
+
+        # 7. Bollinger Band percent position (max ±0.5)
+        bbp = row.get("BBP_20_2.0")
+        if _valid(bbp):
+            if bbp > 0.6:
+                raw += 0.5
+            elif bbp < 0.4:
+                raw -= 0.5
+
+        # 8. Above rolling VWAP (max ±0.5)
+        above_vwap = row.get("above_vwap")
+        if _valid(above_vwap):
+            raw += 0.5 if above_vwap else -0.5
+
+        return raw
+
+
+def _to_label(score: float) -> str:
+    for threshold, label in _SCORE_THRESHOLDS:
+        if score >= threshold:
+            return label
+    return "STRONG_SELL"
+
+
+def _valid(val) -> bool:
+    """True if val is a non-NaN scalar."""
+    if val is None:
+        return False
+    try:
+        return not np.isnan(val)
+    except TypeError:
+        return True  # booleans and other non-float types are always valid

@@ -148,6 +148,20 @@ class TechnicalAnalysisAgent(BaseAgent):
             df["pct_from_52w_high"] = ((c - df["52w_high"]) / df["52w_high"]) * 100
             df["pct_from_52w_low"] = ((c - df["52w_low"]) / df["52w_low"]) * 100
 
+        # Rolling VWAP (20-bar volume-weighted average price, useful on daily bars)
+        tp = (df["high"] + df["low"] + df["close"]) / 3
+        vol = df["volume"].astype(float)
+        df["VWAP_20"] = (tp * vol).rolling(20).sum() / vol.rolling(20).sum()
+        df["above_vwap"] = c > df["VWAP_20"]
+
+        # OBV slope over 5 bars — positive = accumulation
+        if "OBV" in df.columns:
+            df["OBV_slope"] = df["OBV"] - df["OBV"].shift(5)
+
+        # MACD histogram direction — needed by composite TA score
+        if "MACDh_12_26_9" in df.columns:
+            df["MACDh_prev"] = df["MACDh_12_26_9"].shift(1)
+
         return df
 
     def get_summary(self, df: pd.DataFrame) -> dict:
