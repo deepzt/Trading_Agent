@@ -1,0 +1,33 @@
+# NSE Trading Holidays — update annually before Jan 1
+# Source: https://www.nseindia.com/resources/exchange-communication-holidays
+# If a Thursday appears here, F&O expiry rolls back to the preceding Wednesday.
+
+holidays:
+  # ── 2025 ──────────────────────────────────────────────────────────────────
+  - "2025-02-19"  # Chhatrapati Shivaji Maharaj Jayanti
+  - "2025-03-14"  # Holi
+  - "2025-03-31"  # Id-Ul-Fitr (Ramzan Id)
+  - "2025-04-10"  # Shri Ram Navami
+  - "2025-04-14"  # Dr. Baba Saheb Ambedkar Jayanti
+  - "2025-04-18"  # Good Friday
+  - "2025-05-01"  # Maharashtra Day
+  - "2025-06-07"  # Bakri Id (Id-Ul-Adha) — tentative, verify with NSE
+  - "2025-07-11"  # Muharram — tentative, verify with NSE
+  - "2025-08-15"  # Independence Day
+  - "2025-10-02"  # Mahatma Gandhi Jayanti / Dussehra
+  - "2025-10-21"  # Diwali - Laxmi Puja
+  - "2025-10-22"  # Diwali - Balipratipada
+  - "2025-11-05"  # Prakash Gurpurb (Guru Nanak Jayanti)
+  - "2025-12-25"  # Christmas
+
+  # ── 2026 (tentative — update when NSE announces official list) ────────────
+  - "2026-01-26"  # Republic Day
+  - "2026-03-20"  # Holi — tentative
+  - "2026-04-02"  # Good Friday — tentative
+  - "2026-04-14"  # Dr. Baba Saheb Ambedkar Jayanti
+  - "2026-05-01"  # Maharashtra Day
+  - "2026-08-15"  # Independence Day
+  - "2026-10-02"  # Mahatma Gandhi Jayanti
+  - "2026-10-29"  # Diwali - Laxmi Puja — tentative
+  - "2026-11-25"  # Prakash Gurpurb — tentative
+  - "2026-12-25"  # Christmas

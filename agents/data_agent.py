@@ -147,8 +147,8 @@ class DataAgent(BaseAgent):
         path = self._cache_path(key)
         if not path.exists():
             return None
-        # Cache TTL: 15 minutes for intraday, 7 days for daily+
-        ttl_minutes = 15 if "m_" in key else 60 * 24 * 7
+        # Cache TTL: 15 minutes for intraday, 15 minutes for daily (refreshes with dashboard)
+        ttl_minutes = 15
         age_minutes = (datetime.now().timestamp() - path.stat().st_mtime) / 60
         if age_minutes > ttl_minutes:
             return None

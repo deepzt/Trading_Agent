@@ -86,6 +86,15 @@ class RiskAgent(BaseAgent):
         if signal.symbol in blackout_syms and signal.strategy in ("swing", "positional"):
             return False, f"Earnings blackout: board meeting within 3 trading days"
 
+        # F&O expiry gating
+        expiry_ctx = (context or {}).get("expiry_context", {})
+        expiry_risk = expiry_ctx.get("expiry_risk", "NONE")
+        if expiry_risk in ("EXPIRY_WEEK", "EXPIRY_DAY") and signal.strategy == "positional":
+            return False, f"Positional blocked: F&O expiry within 48h ({expiry_ctx.get('next_expiry', '?')})"
+        if expiry_risk == "EXPIRY_DAY" and signal.strategy == "intraday":
+            if self._get_intraday_position_count() >= 1:
+                return False, f"Intraday capped at 1 on F&O expiry day"
+
         # Min confidence check
         min_conf = 7.0  # After Claude validation, should be at least 7
         if signal.confidence < min_conf:

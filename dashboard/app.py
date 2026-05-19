@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 import yfinance as yf
 import pytz
 
+from streamlit_autorefresh import st_autorefresh
+
 from agents.data_agent import DataAgent
 from agents.portfolio_agent import PortfolioAgent
 from agents.technical_analysis_agent import TechnicalAnalysisAgent
@@ -40,6 +42,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Auto-refresh every 5 minutes (300,000 ms). Returns the refresh count.
+_refresh_count = st_autorefresh(interval=300_000, limit=None, key="dashboard_autorefresh")
 
 # ── Dark terminal CSS ──────────────────────────────────────────────────────
 
@@ -595,6 +600,8 @@ with st.sidebar:
         "</div>",
         unsafe_allow_html=True,
     )
+    _now_ist = datetime.now(pytz.timezone("Asia/Kolkata"))
+    st.caption(f"Last refreshed: {_now_ist.strftime('%H:%M:%S')} IST  ·  auto every 5 min")
     st.divider()
 
     # Live portfolio snapshot
@@ -782,7 +789,7 @@ with tabs[0]:
             da = DataAgent()
             ta = TechnicalAnalysisAgent()
             nifty_syms = da.get_watchlist("nifty50")[:25]
-            raw = da.run(nifty_syms, timeframe="1d", days=220)
+            raw = da.run(nifty_syms, timeframe="1d", days=300)
             enriched = ta.run(raw)
             above, below, total = 0, 0, 0
             for sym, df in enriched.items():
@@ -795,9 +802,12 @@ with tabs[0]:
             if total > 0:
                 breadth_pct = round((above / total) * 100, 1)
                 bc1, bc2, bc3, bc4, bc5 = st.columns(5)
-                bc1.metric("Above 200 EMA", f"{above}/{total}", f"{breadth_pct}%")
-                bc2.metric("Breadth Score", f"{breadth_pct}%",
-                           "Bullish" if breadth_pct > 60 else ("Bearish" if breadth_pct < 40 else "Neutral"))
+                bc1.metric("Above 200 EMA", f"{above}/{total}", f"{breadth_pct}%",
+                           delta_color="normal" if breadth_pct >= 50 else "inverse")
+                _signal = "Bullish" if breadth_pct > 60 else ("Bearish" if breadth_pct < 40 else "Neutral")
+                _delta = f"-{_signal}" if breadth_pct < 40 else _signal
+                _dcolor = "off" if 40 <= breadth_pct <= 60 else "normal"
+                bc2.metric("Breadth Score", f"{breadth_pct}%", delta=_delta, delta_color=_dcolor)
 
                 fig_breadth = go.Figure(go.Indicator(
                     mode="gauge+number",

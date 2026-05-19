@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from agents.claude_validation_agent import ClaudeValidationAgent
 from agents.data_agent import DataAgent
 from agents.earnings_calendar_agent import EarningsCalendarAgent
+from agents.fno_calendar_agent import FnOCalendarAgent
 from agents.notification_agent import NotificationAgent
 from agents.portfolio_agent import PortfolioAgent
 from agents.regime_detector import RegimeDetector
@@ -51,6 +52,7 @@ class TradingState(TypedDict):
     regime: str
     earnings_blackout_symbols: List[str]
     momentum_ranks: Dict[str, float]
+    expiry_context: Dict[str, Any]
     active_strategies: List[str]
 
 
@@ -60,7 +62,7 @@ def fetch_data(state: TradingState) -> TradingState:
     _logger.info("Step 1: Fetching market data")
     agent = DataAgent()
     symbols = state["symbols"]
-    state["raw_data"] = agent.run(symbols, timeframe="1d", days=365)
+    state["raw_data"] = agent.run(symbols, timeframe="1d", days=400)
     return state
 
 
@@ -112,6 +114,16 @@ def check_earnings(state: TradingState) -> TradingState:
     except Exception as e:
         _logger.error(f"Earnings calendar node failed: {e} — no blackouts applied")
         state["earnings_blackout_symbols"] = []
+    return state
+
+
+def check_fno_expiry(state: TradingState) -> TradingState:
+    _logger.info("Step 3e: Checking F&O expiry calendar")
+    try:
+        state["expiry_context"] = FnOCalendarAgent().run()
+    except Exception as e:
+        _logger.error(f"F&O expiry check failed: {e} — no expiry gating applied")
+        state["expiry_context"] = {"expiry_risk": "NONE"}
     return state
 
 
@@ -196,7 +208,10 @@ def check_risk(state: TradingState) -> TradingState:
     _logger.info("Step 6: Risk checks and position sizing")
     portfolio = PortfolioAgent()
     agent = RiskAgent(portfolio)
-    context = {"earnings_blackout_symbols": state.get("earnings_blackout_symbols", [])}
+    context = {
+        "earnings_blackout_symbols": state.get("earnings_blackout_symbols", []),
+        "expiry_context": state.get("expiry_context", {"expiry_risk": "NONE"}),
+    }
     approved_with_qty = agent.run(
         [s for s in state["validated_signals"] if s.status == "APPROVED"],
         context=context,
@@ -312,6 +327,7 @@ def build_graph() -> Any:
     workflow.add_node("detect_regime", detect_regime)
     workflow.add_node("fetch_composite_ratings", fetch_composite_ratings)
     workflow.add_node("check_earnings", check_earnings)
+    workflow.add_node("check_fno_expiry", check_fno_expiry)
     workflow.add_node("compute_performance", compute_performance)
     workflow.add_node("generate_signals", generate_signals)
     workflow.add_node("validate_claude", validate_with_claude)
@@ -326,7 +342,8 @@ def build_graph() -> Any:
     workflow.add_edge("fetch_sentiment", "detect_regime")
     workflow.add_edge("detect_regime", "fetch_composite_ratings")
     workflow.add_edge("fetch_composite_ratings", "check_earnings")
-    workflow.add_edge("check_earnings", "compute_performance")
+    workflow.add_edge("check_earnings", "check_fno_expiry")
+    workflow.add_edge("check_fno_expiry", "compute_performance")
     workflow.add_edge("compute_performance", "generate_signals")
     workflow.add_edge("generate_signals", "validate_claude")
     workflow.add_edge("validate_claude", "check_risk")
@@ -448,6 +465,7 @@ class TradingScheduler:
             "regime": "TRENDING",
             "earnings_blackout_symbols": [],
             "momentum_ranks": {},
+            "expiry_context": {"expiry_risk": "NONE"},
             "active_strategies": [],
         }
         try:
