@@ -1,4 +1,4 @@
-# NSE Watchlist — Nifty 50 + select Midcap stocks
+# NSE Watchlist — Nifty 50 + Nifty Next 50 + select Midcap stocks
 # Symbols use NSE format (append .NS for yfinance)
 
 nifty50:
@@ -53,17 +53,168 @@ nifty50:
   - LTIM
   - BAJAJ-AUTO
 
+nifty_next50:
+  - AMBUJACEM
+  - AUROPHARMA
+  - BANKBARODA
+  - BHEL
+  - BIOCON
+  - BOSCHLTD
+  - CANBK
+  - CHOLAFIN
+  - COLPAL
+  - CONCOR
+  - DABUR
+  - DMART
+  - FEDERALBNK
+  - GAIL
+  - GODREJCP
+  - HAVELLS
+  - HINDPETRO
+  - ICICIGI
+  - ICICIPRULI
+  - IDFCFIRSTB
+  - INDHOTEL
+  - INDUSTOWER
+  - IRCTC
+  - JINDALSTEL
+  - JSWENERGY
+  - LICI
+  - LUPIN
+  - MARICO
+  - MOTHERSON
+  - MPHASIS
+  - NAUKRI
+  - NHPC
+  - NMDC
+  - OBEROIRLTY
+  - OFSS
+  - PAGEIND
+  - PATANJALI
+  - PERSISTENT
+  - PIIND
+  - POLYCAB
+  - RECLTD
+  - SRF
+  - SIEMENS
+  - TATACOMM
+  - TATAELXSI
+  - TRENT
+  - UNIONBANK
+  - VBL
+  - VEDL
+  - ZYDUSLIFE
+
+nifty100:
+  # Nifty 50
+  - RELIANCE
+  - TCS
+  - HDFCBANK
+  - INFY
+  - ICICIBANK
+  - HINDUNILVR
+  - ITC
+  - SBIN
+  - BHARTIARTL
+  - KOTAKBANK
+  - LT
+  - AXISBANK
+  - ASIANPAINT
+  - MARUTI
+  - SUNPHARMA
+  - TITAN
+  - BAJFINANCE
+  - WIPRO
+  - ULTRACEMCO
+  - HCLTECH
+  - TATAMOTORS
+  - ONGC
+  - POWERGRID
+  - NTPC
+  - JSWSTEEL
+  - TATASTEEL
+  - TECHM
+  - INDUSINDBK
+  - COALINDIA
+  - ADANIENT
+  - ADANIPORTS
+  - BAJAJFINSV
+  - DIVISLAB
+  - DRREDDY
+  - EICHERMOT
+  - GRASIM
+  - HEROMOTOCO
+  - HINDALCO
+  - M&M
+  - CIPLA
+  - BRITANNIA
+  - SBILIFE
+  - HDFCLIFE
+  - APOLLOHOSP
+  - TATACONSUM
+  - BPCL
+  - NESTLEIND
+  - UPL
+  - LTIM
+  - BAJAJ-AUTO
+  # Nifty Next 50
+  - AMBUJACEM
+  - AUROPHARMA
+  - BANKBARODA
+  - BHEL
+  - BIOCON
+  - BOSCHLTD
+  - CANBK
+  - CHOLAFIN
+  - COLPAL
+  - CONCOR
+  - DABUR
+  - DMART
+  - FEDERALBNK
+  - GAIL
+  - GODREJCP
+  - HAVELLS
+  - HINDPETRO
+  - ICICIGI
+  - ICICIPRULI
+  - IDFCFIRSTB
+  - INDHOTEL
+  - INDUSTOWER
+  - IRCTC
+  - JINDALSTEL
+  - JSWENERGY
+  - LICI
+  - LUPIN
+  - MARICO
+  - MOTHERSON
+  - MPHASIS
+  - NAUKRI
+  - NHPC
+  - NMDC
+  - OBEROIRLTY
+  - OFSS
+  - PAGEIND
+  - PATANJALI
+  - PERSISTENT
+  - PIIND
+  - POLYCAB
+  - RECLTD
+  - SRF
+  - SIEMENS
+  - TATACOMM
+  - TATAELXSI
+  - TRENT
+  - UNIONBANK
+  - VBL
+  - VEDL
+  - ZYDUSLIFE
+
 midcap_focus:
   - VOLTAS
   - MUTHOOTFIN
-  - PERSISTENT
   - COFORGE
-  - TRENT
-  - GODREJCP
   - PIDILITIND
   - BERGEPAINT
-  - PAGEIND
-  - HAVELLS
 
 indices:
   - NIFTY 50

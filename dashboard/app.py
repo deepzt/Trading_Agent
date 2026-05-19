@@ -650,7 +650,7 @@ with st.sidebar:
                 try:
                     from orchestrator.workflow import TradingScheduler
                     da = DataAgent()
-                    symbols = da.get_watchlist("nifty50")[:20]
+                    symbols = da.get_watchlist("nifty100")[:30]
                     TradingScheduler(symbols).run_now()
                     st.success("Done — check Live Signals tab.")
                 except Exception as e:
@@ -753,7 +753,7 @@ with tabs[0]:
         st.markdown("#### Top Movers (Nifty 50)")
         try:
             da = DataAgent()
-            nifty = da.get_watchlist("nifty50")
+            nifty = da.get_watchlist("nifty100")
             gainers, losers = fetch_movers(nifty, top_n=5)
 
             if not gainers.empty:
@@ -788,7 +788,7 @@ with tabs[0]:
         try:
             da = DataAgent()
             ta = TechnicalAnalysisAgent()
-            nifty_syms = da.get_watchlist("nifty50")[:25]
+            nifty_syms = da.get_watchlist("nifty100")[:50]
             raw = da.run(nifty_syms, timeframe="1d", days=300)
             enriched = ta.run(raw)
             above, below, total = 0, 0, 0
@@ -1236,7 +1236,7 @@ with tabs[5]:
         st.error(f"Could not load watchlist config: {e}")
         st.stop()
 
-    wl_group = st.radio("Group", ["nifty50", "midcap_focus"], horizontal=True)
+    wl_group = st.radio("Group", ["nifty100", "nifty50", "nifty_next50", "midcap_focus"], horizontal=True)
     symbols_list = watchlist.get(wl_group, [])
 
     col_load, col_n = st.columns([1, 3])

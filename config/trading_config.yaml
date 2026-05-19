@@ -66,7 +66,7 @@ technical:
 signals:
   min_confidence_for_claude: 6.0    # Only send to Claude if rules score >= 6/10
   min_confidence_to_trade: 7.0      # Only paper trade if final score >= 7/10
-  max_signals_per_run: 10           # Cap signals generated per scan
+  max_signals_per_run: 15           # Cap signals generated per scan (raised for Nifty 100 universe)
   cooldown_hours: 4                 # Don't re-signal same stock for 4 hrs
 
 volatility_scaling:

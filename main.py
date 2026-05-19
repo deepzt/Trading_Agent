@@ -43,7 +43,7 @@ def run_single_scan():
 
     _logger.info(f"Running signal scan at {current_ist_time()}")
     data_agent = DataAgent()
-    symbols = data_agent.get_watchlist("nifty50")
+    symbols = data_agent.get_watchlist("nifty100")
 
     scheduler = TradingScheduler(symbols)
     scheduler.run_now()
@@ -126,8 +126,8 @@ def _start_scheduler_thread() -> "TradingScheduler":
     _logger.info("=" * 60)
 
     data_agent = DataAgent()
-    symbols = data_agent.get_watchlist("nifty50")
-    _logger.info(f"Watching {len(symbols)} Nifty 50 stocks")
+    symbols = data_agent.get_watchlist("nifty100")
+    _logger.info(f"Watching {len(symbols)} Nifty 100 stocks")
 
     scheduler = TradingScheduler(symbols)
     scheduler.start()
