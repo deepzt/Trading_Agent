@@ -172,6 +172,7 @@ def main():
     parser.add_argument("--portfolio", action="store_true", help="Show portfolio stats")
     parser.add_argument("--review", metavar="FEATURE", help="Architecture review for a proposed feature")
     parser.add_argument("--research-review", action="store_true", help="Run Trading Specialist Agent for research-backed improvement suggestions")
+    parser.add_argument("--question", type=str, default=None, help="Targeted question to pass to the Trading Specialist (use with --research-review)")
     args = parser.parse_args()
 
     if args.headless:
@@ -188,7 +189,7 @@ def main():
         run_architecture_review(args.review)
     elif getattr(args, "research_review", False):
         from agents.trading_specialist_agent import TradingSpecialistAgent
-        report = TradingSpecialistAgent().run()
+        report = TradingSpecialistAgent().run(question=args.question)
         print("\n" + "=" * 70)
         print("TRADING RESEARCH IMPROVEMENT REPORT")
         print("=" * 70 + "\n")

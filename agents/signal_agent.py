@@ -142,14 +142,19 @@ class SignalAgent(BaseAgent):
         self.log_info(f"Generated {len(signals)} signals from {len(enriched_data)} symbols (regime={regime})")
         return signals
 
-    def _apply_vol_scaling(self, score: float, atr: float, entry: float) -> float:
-        """Scale score down when ATR% exceeds baseline — high-vol stocks get lower confidence."""
+    def _apply_vol_scaling(self, score: float, atr: float, entry: float,
+                           regime: str = "TRENDING") -> float:
+        """Scale score down when a stock's ATR% exceeds the regime baseline.
+        In VOLATILE regime the whole market is wider, so the baseline is raised to avoid
+        penalising every signal uniformly — only outlier-volatile stocks are penalised."""
         vs_cfg = self._cfg.get("volatility_scaling", {})
         if not vs_cfg.get("enabled", True):
             return score
         if entry <= 0 or atr <= 0:
             return score
-        baseline = vs_cfg.get("baseline_atr_pct", 1.5) / 100
+        baseline_normal = vs_cfg.get("baseline_atr_pct", 1.5) / 100
+        # In VOLATILE regime raise the baseline so market-wide widening doesn't kill scores
+        baseline = baseline_normal * 1.5 if regime == "VOLATILE" else baseline_normal
         current_atr_pct = atr / entry
         vol_scale = min(baseline / current_atr_pct, 1.0)
         return round(score * vol_scale, 2)
@@ -177,6 +182,8 @@ class SignalAgent(BaseAgent):
                 return self._intraday_signal(symbol, df, composite_ratings, regime)
             elif strategy == "positional":
                 return self._positional_signal(symbol, df, composite_ratings, momentum_ranks)
+            elif strategy == "mean_reversion":
+                return self._mean_reversion_signal(symbol, df, composite_ratings, regime)
         except Exception as e:
             self.log_error(f"Signal error {symbol}/{strategy}: {e}")
         return None
@@ -249,7 +256,7 @@ class SignalAgent(BaseAgent):
 
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.02)
-        score = self._apply_vol_scaling(score, atr, entry)
+        score = self._apply_vol_scaling(score, atr, entry, regime)
 
         atr_mult = self._risk["stop_loss"]["atr_multiplier"]
         if regime == "VOLATILE":
@@ -326,7 +333,7 @@ class SignalAgent(BaseAgent):
 
         entry = close
         atr = row.get("ATRr_14", entry * 0.015)
-        score = self._apply_vol_scaling(score, atr, entry)
+        score = self._apply_vol_scaling(score, atr, entry, regime)
         atr_mult = 1.33 if regime == "VOLATILE" else 1.0
         sl_dist = max(atr * atr_mult, (entry - float(row["low"])) * 1.1)
 
@@ -414,7 +421,7 @@ class SignalAgent(BaseAgent):
 
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.025)
-        score = self._apply_vol_scaling(score, atr, entry)
+        score = self._apply_vol_scaling(score, atr, entry)  # positional: always use normal baseline
         sl_dist = atr * 2.0  # Wider stop for positional
 
         stop_loss = entry - sl_dist
@@ -426,6 +433,94 @@ class SignalAgent(BaseAgent):
             entry_price=entry, stop_loss=stop_loss,
             target_1=target_1, target_2=target_2,
             confidence=min(score, 10.0), reasons=reasons, timeframe="1wk"
+        )
+        sig.composite_rating = composite_rating
+        return sig
+
+    def _mean_reversion_signal(self, symbol: str, df: pd.DataFrame,
+                                composite_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
+        """Oversold bounce signal — fires ONLY in VOLATILE regime.
+        Buys stocks near lower Bollinger Band with RSI < 35, targeting return to EMA21.
+        Based on De Bondt & Thaler mean-reversion and Gervais et al. volume research."""
+        if regime not in ("VOLATILE",):
+            return None
+        if len(df) < 20:
+            return None
+
+        cfg = self._cfg["strategies"].get("mean_reversion", {})
+        row = df.iloc[-1]
+        close = float(row["close"])
+
+        # Must be near or below lower Bollinger Band
+        bb_lower = row.get("BBL_20_2.0")
+        bb_mid = row.get("BBM_20_2.0")
+        if bb_lower is None or bb_mid is None:
+            return None
+        bb_lower = float(bb_lower)
+        bb_mid = float(bb_mid)
+        band_tolerance = cfg.get("bb_band_tolerance", 0.005)
+        if close > bb_lower * (1 + band_tolerance):
+            return None
+
+        # RSI must be in oversold zone
+        rsi = row.get("RSI_14")
+        if rsi is None:
+            return None
+        rsi = float(rsi)
+        if rsi >= cfg.get("rsi_oversold", 35):
+            return None
+
+        # Price must be below EMA21 (confirming downward pressure)
+        ema21 = row.get("EMA_21")
+        if ema21 is None:
+            return None
+        ema21 = float(ema21)
+        if close >= ema21:
+            return None
+
+        reasons = [
+            "Near lower Bollinger Band (oversold)",
+            f"RSI {rsi:.0f} — oversold zone",
+            "Below EMA21 — mean reversion setup",
+        ]
+        score = 6.0
+
+        if rsi < 25:
+            score += 1.0
+            reasons.append("RSI critically oversold")
+
+        # Avoid catching falling knives: penalise strong bearish TA
+        composite_rating = composite_ratings.get(symbol, "NEUTRAL")
+        if composite_rating == "STRONG_SELL":
+            score -= 1.5
+        elif composite_rating == "SELL":
+            score -= 0.5
+        elif composite_rating in ("BUY", "STRONG_BUY"):
+            score += 0.5
+            reasons.append(f"CompositeTA: {composite_rating}")
+
+        if score < 5.0:
+            return None
+
+        entry = close
+        atr = float(row.get("ATRr_14", entry * 0.015))
+        low = float(row["low"])
+        sl_dist = max(atr * 1.5, (entry - low) * 1.1)
+        stop_loss = entry - sl_dist
+
+        target_1 = ema21        # First target: return to EMA21
+        reward = target_1 - entry
+        if reward <= 0 or reward / sl_dist < cfg.get("min_rr", 1.0):
+            return None
+
+        target_2 = round(entry + reward * 2, 2)
+        score = self._apply_vol_scaling(score, atr, entry, regime)
+
+        sig = Signal(
+            symbol=symbol, signal_type="BUY", strategy="intraday",
+            entry_price=entry, stop_loss=round(stop_loss, 2),
+            target_1=round(target_1, 2), target_2=target_2,
+            confidence=min(score, 10.0), reasons=reasons, timeframe="15m"
         )
         sig.composite_rating = composite_rating
         return sig

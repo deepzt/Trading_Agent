@@ -161,13 +161,13 @@ class TradingSpecialistAgent(BaseAgent):
                 pass
         return "none"
 
-    def run(self) -> str:
+    def run(self, question: str = None) -> str:
         """Read system state, call AI, return improvement report as markdown string."""
         if self._provider == "none":
             return "No AI provider available. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."
 
         context = self._gather_system_context()
-        prompt = self._build_prompt(context)
+        prompt = self._build_prompt(context, question)
         self.log_info("Requesting research-backed improvement suggestions…")
 
         try:
@@ -237,8 +237,10 @@ class TradingSpecialistAgent(BaseAgent):
 - EMA 9/21 crossover swing strategy with RSI 40-65 filter and ATR stops
 - Intraday breakout above prior-day high with 1.5x volume surge requirement
 - Positional weekly trend following with EMA 200, RSI 45-70, 12-1M momentum rank ≥60th pct
+- Mean-reversion intraday: oversold bounce near lower Bollinger Band (RSI<35), active only in VOLATILE regime
 - TradingView TA cross-validation (STRONG_BUY/BUY/NEUTRAL/SELL/STRONG_SELL)
 - Claude/GPT AI signal validation with APPROVE/REJECT/MODIFY verdicts
+- MODIFY verdict treated as conditional APPROVE if confidence ≥7.0 (stop tightened 20%)
 - Market regime detection: TRENDING / VOLATILE (VIX≥18) / CRISIS (VIX≥24)
 - ATR stop widening 33% in VOLATILE regime; no intraday signals in CRISIS
 - Earnings blackout: blocks swing/positional signals within 3 trading days of board meeting
@@ -250,7 +252,12 @@ class TradingSpecialistAgent(BaseAgent):
 """
         return ctx
 
-    def _build_prompt(self, ctx: dict) -> str:
+    def _build_prompt(self, ctx: dict, question: str = None) -> str:
+        focused_q = (
+            f"\n## Specific Question\n{question}\n\n"
+            "Address this question FIRST, in detail, before the general improvement report.\n"
+        ) if question else ""
+
         return f"""
 Please review this trading system and suggest research-backed improvements.
 
@@ -281,7 +288,7 @@ Please review this trading system and suggest research-backed improvements.
 ```json
 {ctx['tuning_state']}
 ```
-
+{focused_q}
 Based on all of the above, produce your improvement report now.
 """
 

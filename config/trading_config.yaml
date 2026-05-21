@@ -15,6 +15,7 @@ strategies:
     - swing          # Always on
     - positional     # Always on
     - intraday       # Only during market hours
+    - mean_reversion # Oversold bounce — activates only in VOLATILE regime
     # - options      # Uncomment when F&O data is set up
 
   intraday:
@@ -45,6 +46,12 @@ strategies:
     rsi_min: 45
     rsi_max: 70
     min_holding_days: 15
+
+  mean_reversion:
+    rsi_oversold: 35             # RSI must be below this to qualify
+    bb_band_tolerance: 0.005     # Allow up to 0.5% above lower Bollinger Band
+    min_rr: 1.0                  # Minimum reward/risk ratio to generate signal
+    # Only activates when regime == VOLATILE (gated in signal_agent.py)
 
   options:
     screener_timeframe: "1d"

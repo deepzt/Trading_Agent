@@ -73,6 +73,7 @@ class ClaudeValidationAgent(BaseAgent):
             cfg = yaml.safe_load(f)
 
         self._min_confidence = cfg["signals"]["min_confidence_for_claude"]
+        self._modify_approval_threshold = cfg["signals"].get("min_confidence_to_trade", 7.0)
         self._max_tokens = cfg["claude"]["max_tokens"]
 
         preferred = cfg.get("validation", {}).get("provider", "auto")
@@ -126,7 +127,18 @@ class ClaudeValidationAgent(BaseAgent):
                 if result.get("modified_target_2"):
                     signal.target_2 = round(float(result["modified_target_2"]), 2)
 
-                signal.status = "APPROVED" if signal.claude_verdict == "APPROVE" else "REJECTED"
+                if signal.claude_verdict == "APPROVE":
+                    signal.status = "APPROVED"
+                elif (signal.claude_verdict == "MODIFY"
+                      and signal.confidence >= self._modify_approval_threshold):
+                    # Conditional approval: tighten stop 20% if AI didn't supply a specific SL
+                    if not result.get("modified_stop_loss"):
+                        sl_dist = signal.entry_price - signal.stop_loss
+                        signal.stop_loss = round(signal.entry_price - sl_dist * 0.8, 2)
+                    signal.claude_reasoning = (signal.claude_reasoning or "") + " [Conditional: tighter stop applied]"
+                    signal.status = "APPROVED"
+                else:
+                    signal.status = "REJECTED"
             else:
                 signal.claude_verdict = "SKIP"
                 signal.claude_reasoning = "AI API unavailable — signal held for safety"
