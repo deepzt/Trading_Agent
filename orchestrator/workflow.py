@@ -287,6 +287,7 @@ def execute_paper_trades(state: TradingState) -> TradingState:
             signal.stop_loss = round(signal.stop_loss + price_shift, 2)
             signal.target_1 = round(signal.target_1 + price_shift, 2)
             signal.target_2 = round(signal.target_2 + price_shift, 2)
+            signal.recompute_risk()  # keep sl_pct/risk_reward consistent with new levels
 
             # Re-apply max_position_pct cap against live price (quantity was sized on stale price)
             max_qty_by_value = int((account_size * max_position_pct) / signal.entry_price)
@@ -425,7 +426,7 @@ class TradingScheduler:
             for trade in closed:
                 emoji = "✅" if (trade.get("pnl") or 0) >= 0 else "❌"
                 notif.send_alert(
-                    f"{emoji} {trade['symbol']} closed: {trade['reason']} | P&L ₹{trade.get('pnl', 0):.2f}"
+                    f"{emoji} {trade['symbol']} closed: {trade['reason']} | P&L ₹{(trade.get('pnl') or 0):.2f}"
                 )
 
     @staticmethod
@@ -460,7 +461,7 @@ class TradingScheduler:
                 emoji = "✅" if (trade.get("pnl") or 0) >= 0 else "❌"
                 label = "EOD Close (missed — closed on restart)" if stale_only else "EOD Close"
                 notif.send_alert(
-                    f"{emoji} {label}: {trade['symbol']} @ ₹{trade['exit_price']:.2f} | P&L ₹{trade.get('pnl', 0):.2f}"
+                    f"{emoji} {label}: {trade['symbol']} @ ₹{trade['exit_price']:.2f} | P&L ₹{(trade.get('pnl') or 0):.2f}"
                 )
             _logger.info(f"EOD closed {len(closed)} intraday position(s)")
         return closed

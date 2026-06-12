@@ -56,10 +56,16 @@ class Signal:
         self.composite_rating: str = "UNKNOWN"
 
         # Computed
-        sl_dist = abs(entry_price - stop_loss)
-        t2_dist = abs(target_2 - entry_price)
+        self.recompute_risk()
+
+    def recompute_risk(self) -> None:
+        """Refresh derived risk fields (risk_reward, sl_pct) after entry/SL/target
+        mutation — e.g. AI-modified stop, conditional-approval tighten, or the
+        live-price shift at execution. Risk gates must never see stale values."""
+        sl_dist = abs(self.entry_price - self.stop_loss)
+        t2_dist = abs(self.target_2 - self.entry_price)
         self.risk_reward = round(t2_dist / sl_dist, 2) if sl_dist > 0 else 0.0
-        self.sl_pct = round((sl_dist / entry_price) * 100, 2)
+        self.sl_pct = round((sl_dist / self.entry_price) * 100, 2) if self.entry_price else 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -516,11 +522,15 @@ class SignalAgent(BaseAgent):
         target_2 = round(entry + reward * 2, 2)
         score = self._apply_vol_scaling(score, atr, entry, regime)
 
+        # NOTE: strategy must be "mean_reversion", NOT "intraday" — the bounce to EMA21
+        # is a multi-day move on daily candles. Labelling it intraday force-closed it at
+        # 3:20 PM, applied the intraday cost model, and pooled its stats/Kelly/auto-tune
+        # under the (disabled) intraday breakout strategy.
         sig = Signal(
-            symbol=symbol, signal_type="BUY", strategy="intraday",
+            symbol=symbol, signal_type="BUY", strategy="mean_reversion",
             entry_price=entry, stop_loss=round(stop_loss, 2),
             target_1=round(target_1, 2), target_2=target_2,
-            confidence=min(score, 10.0), reasons=reasons, timeframe="15m"
+            confidence=min(score, 10.0), reasons=reasons, timeframe="1d"
         )
         sig.composite_rating = composite_rating
         return sig

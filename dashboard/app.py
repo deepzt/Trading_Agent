@@ -926,6 +926,7 @@ with tabs[1]:
             invested = sum(p["entry_price"] * p["quantity"] for p in open_sym)
             unrealized = sum(
                 (live_data.get(sym, p["entry_price"]) - p["entry_price"]) * p["quantity"]
+                * (-1 if p["signal_type"] == "SELL" else 1)  # shorts gain when price falls
                 for p in open_sym
             )
             closed_sym = history[history["symbol"] == sym] if not history.empty else pd.DataFrame()
@@ -955,8 +956,9 @@ with tabs[1]:
             for p in positions:
                 lp = live_data.get(p["symbol"], p["entry_price"])
                 entry = p["entry_price"] or 0
-                unreal = (lp - entry) * p["quantity"]
-                unreal_pct = ((lp - entry) / entry * 100) if entry != 0 else 0.0
+                direction = -1 if p["signal_type"] == "SELL" else 1  # shorts gain when price falls
+                unreal = (lp - entry) * p["quantity"] * direction
+                unreal_pct = ((lp - entry) / entry * 100 * direction) if entry != 0 else 0.0
                 pos_rows.append({
                     "Symbol": p["symbol"],
                     "Strategy": p["strategy"],

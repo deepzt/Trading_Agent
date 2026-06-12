@@ -140,6 +140,7 @@ class PaperBroker(BaseBroker):
 
             exit_price = None
             reason = None
+            scaled_out = False  # True if a T1/T2 scale-out acted on this position this tick
 
             if signal_type == "BUY":
                 if d_low <= sl:
@@ -154,11 +155,13 @@ class PaperBroker(BaseBroker):
                         self._scale_out(closed, trade_id, symbol, orig_qty, qty, t1,
                                         self._t1_exit_pct, "t1", "TARGET_1_PARTIAL",
                                         new_sl=entry, sl_label="breakeven")
+                        scaled_out = True
                 elif t1_booked and (not t2_booked) and d_high >= t2:
                     # Scale out at T2 and trail the stop up to T1 — let the rest run
                     self._scale_out(closed, trade_id, symbol, orig_qty, qty, t2,
                                     self._t2_exit_pct, "t2", "TARGET_2_PARTIAL",
                                     new_sl=t1, sl_label="T1")
+                    scaled_out = True
                 elif self._should_exit_on_indicators(symbol, pos.get("strategy"), ta_data):
                     exit_price, reason = price, "INDICATOR_EXIT"
                     _logger.info(f"{symbol}: indicator exit — EMA bearish + MACD negative @ ₹{price:.2f}")
@@ -169,21 +172,30 @@ class PaperBroker(BaseBroker):
                     self._scale_out(closed, trade_id, symbol, orig_qty, qty, t1,
                                     self._t1_exit_pct, "t1", "TARGET_1_PARTIAL",
                                     new_sl=entry, sl_label="breakeven")
+                    scaled_out = True
                 elif t1_booked and (not t2_booked) and d_low <= t2:
                     self._scale_out(closed, trade_id, symbol, orig_qty, qty, t2,
                                     self._t2_exit_pct, "t2", "TARGET_2_PARTIAL",
                                     new_sl=t1, sl_label="T1")
+                    scaled_out = True
 
             # Time-stop — exit a stalled position that hasn't reached T1 within its window.
-            # Trades that already booked T1 are left to ride their trailed stop.
-            if (exit_price is None and not t1_booked
+            # Trades that already booked T1 are left to ride their trailed stop. The local
+            # t1_booked flag is read before the elif chain, so also skip when a scale-out
+            # just fired this tick — otherwise a trade tagging T1 on/after its max-hold day
+            # would book the partial and then have its runner dumped at market (or, if the
+            # scale-out fully closed it, trigger a double close returning pnl=None).
+            if (exit_price is None and not scaled_out and not t1_booked
                     and self._exceeded_max_hold(pos.get("strategy"), pos.get("entry_time"))):
                 exit_price, reason = price, "TIME_STOP"
                 _logger.info(f"{symbol}: time-stop — held past max window without T1, exit @ ₹{price:.2f}")
 
             if exit_price and reason:
                 pnl = self._portfolio.close_position(trade_id, exit_price, reason)
-                closed.append({"symbol": symbol, "reason": reason, "pnl": pnl})
+                if pnl is None:
+                    _logger.warning(f"{symbol}: {reason} close skipped — position already closed")
+                else:
+                    closed.append({"symbol": symbol, "reason": reason, "pnl": pnl})
 
         return closed
 
@@ -254,8 +266,10 @@ class PaperBroker(BaseBroker):
           1. EMA bearish alignment (EMA9 no longer above EMA21)
           2. MACD histogram negative AND declining
         Skips positional trades — daily candles are too noisy for a weekly strategy.
+        Skips mean-reversion trades — they are entered counter-trend (below EMA21,
+        oversold), so bearish indicators are the entry condition, not an exit signal.
         """
-        if strategy == "positional":
+        if strategy in ("positional", "mean_reversion"):
             return False
         if not ta_data or symbol not in ta_data:
             return False

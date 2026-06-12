@@ -125,23 +125,31 @@ class ClaudeValidationAgent(BaseAgent):
                 adjusted_conf = result.get("confidence", signal.confidence)
                 signal.confidence = round(0.7 * signal.confidence + 0.3 * adjusted_conf, 1)
 
+                # Apply AI level modifications only after sanity-checking direction:
+                # a stop on the wrong side of entry would "stop out" instantly at a
+                # fictitious profit; a target on the wrong side can never be hit.
+                sl_applied = False
                 if result.get("modified_stop_loss"):
-                    signal.stop_loss = round(float(result["modified_stop_loss"]), 2)
+                    sl_applied = self._apply_modified_stop(signal, result["modified_stop_loss"])
                 if result.get("modified_target_2"):
-                    signal.target_2 = round(float(result["modified_target_2"]), 2)
+                    self._apply_modified_target(signal, result["modified_target_2"])
 
                 if signal.claude_verdict == "APPROVE":
                     signal.status = "APPROVED"
                 elif (signal.claude_verdict == "MODIFY"
                       and signal.confidence >= self._modify_approval_threshold):
-                    # Conditional approval: tighten stop 20% if AI didn't supply a specific SL
-                    if not result.get("modified_stop_loss"):
+                    # Conditional approval: tighten stop 20% if AI didn't supply a usable SL
+                    if not sl_applied:
                         sl_dist = signal.entry_price - signal.stop_loss
                         signal.stop_loss = round(signal.entry_price - sl_dist * 0.8, 2)
                     signal.claude_reasoning = (signal.claude_reasoning or "") + " [Conditional: tighter stop applied]"
                     signal.status = "APPROVED"
                 else:
                     signal.status = "REJECTED"
+
+                # SL/T2 may have changed — refresh sl_pct/risk_reward so the risk
+                # gates (max_loss_pct, min RR) never evaluate stale values.
+                signal.recompute_risk()
             else:
                 signal.claude_verdict = "SKIP"
                 signal.claude_reasoning = "AI API unavailable — signal held for safety"
@@ -156,6 +164,41 @@ class ClaudeValidationAgent(BaseAgent):
         approved = sum(1 for s in validated if s.status == "APPROVED")
         self.log_info(f"Validated {len(validated)} signals via {self._provider}: {approved} approved")
         return validated
+
+    def _apply_modified_stop(self, signal: Signal, raw_value) -> bool:
+        """Apply an AI-suggested stop-loss if it is on the correct side of entry.
+        Returns True only when the value was actually applied."""
+        try:
+            new_sl = round(float(raw_value), 2)
+        except (TypeError, ValueError):
+            return False
+        is_long = signal.signal_type == "BUY"
+        valid = (0 < new_sl < signal.entry_price) if is_long else (new_sl > signal.entry_price > 0)
+        if valid:
+            signal.stop_loss = new_sl
+            return True
+        self.log_warning(
+            f"{signal.symbol}: ignored invalid AI stop-loss {new_sl} "
+            f"({signal.signal_type} entry {signal.entry_price})"
+        )
+        return False
+
+    def _apply_modified_target(self, signal: Signal, raw_value) -> bool:
+        """Apply an AI-suggested target_2 if it is on the correct side of entry."""
+        try:
+            new_t2 = round(float(raw_value), 2)
+        except (TypeError, ValueError):
+            return False
+        is_long = signal.signal_type == "BUY"
+        valid = (new_t2 > signal.entry_price) if is_long else (0 < new_t2 < signal.entry_price)
+        if valid:
+            signal.target_2 = new_t2
+            return True
+        self.log_warning(
+            f"{signal.symbol}: ignored invalid AI target_2 {new_t2} "
+            f"({signal.signal_type} entry {signal.entry_price})"
+        )
+        return False
 
     def _validate_signal(self, signal: Signal, sentiment: dict, composite_ratings: dict,
                          perf_context: str = "") -> Optional[dict]:

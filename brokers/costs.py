@@ -58,3 +58,24 @@ def round_trip_cost(entry_price: float, exit_price: float, quantity: float,
     exit_side = "SELL" if position_side.upper() == "BUY" else "BUY"
     return (leg_cost(entry_price * quantity, entry_side, is_intraday)
             + leg_cost(exit_price * quantity, exit_side, is_intraday))
+
+
+def chunk_round_trip_cost(entry_price: float, exit_price: float, chunk_qty: float,
+                          original_qty: float, position_side: str, is_intraday: bool) -> float:
+    """
+    Round-trip cost (INR) for closing `chunk_qty` shares out of an order that was
+    originally `original_qty` shares (T1/T2 scale-outs close one entry order in chunks).
+
+    The entry was ONE executed order, so its cost — including the per-order intraday
+    brokerage cap — is computed once on the full order and pro-rated to this chunk.
+    The exit chunk is its own order and is costed in full. Percentage charges are
+    linear in value, so for delivery this equals round_trip_cost on the chunk.
+    """
+    if chunk_qty <= 0:
+        return 0.0
+    original_qty = max(float(original_qty or 0), float(chunk_qty))
+    entry_side = "BUY" if position_side.upper() == "BUY" else "SELL"
+    exit_side = "SELL" if position_side.upper() == "BUY" else "BUY"
+    entry_cost_full_order = leg_cost(entry_price * original_qty, entry_side, is_intraday)
+    return (entry_cost_full_order * (chunk_qty / original_qty)
+            + leg_cost(exit_price * chunk_qty, exit_side, is_intraday))

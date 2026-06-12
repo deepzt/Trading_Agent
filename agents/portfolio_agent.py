@@ -6,6 +6,7 @@ Reads/writes from SQLite via SQLAlchemy.
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, date
 from typing import Dict, List, Optional
 
@@ -15,7 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from agents.base_agent import BaseAgent
-from brokers.costs import round_trip_cost
+from brokers.costs import chunk_round_trip_cost
 
 _IST = pytz.timezone("Asia/Kolkata")
 
@@ -62,6 +63,17 @@ CREATE TABLE IF NOT EXISTS signals_log (
     risk_reward REAL,
     sl_pct REAL,
     timeframe TEXT
+);
+
+CREATE TABLE IF NOT EXISTS partial_exits (
+    id TEXT PRIMARY KEY,
+    trade_id TEXT NOT NULL,
+    symbol TEXT,
+    quantity INTEGER NOT NULL,
+    exit_price REAL NOT NULL,
+    pnl REAL NOT NULL,
+    reason TEXT,
+    exit_time TEXT NOT NULL
 );
 """
 
@@ -157,10 +169,12 @@ class PortfolioAgent(BaseAgent):
             pnl = (exit_price - row.entry_price) * row.quantity
             if row.signal_type == "SELL":
                 pnl = -pnl
-            # Deduct realistic round-trip transaction costs on the remaining quantity
-            # (each partial chunk is costed separately when it scales out).
-            pnl -= round_trip_cost(
+            # Deduct realistic round-trip transaction costs on the remaining quantity.
+            # The entry leg is pro-rated against the ORIGINAL order size so chunked
+            # scale-outs never multiply the per-order brokerage cap.
+            pnl -= chunk_round_trip_cost(
                 row.entry_price, exit_price, row.quantity,
+                row.original_quantity or row.quantity,
                 row.signal_type, row.strategy == "intraday",
             )
             # Fold in profit already booked from T1/T2 partial scale-outs so the
@@ -203,9 +217,11 @@ class PortfolioAgent(BaseAgent):
             realized = (exit_price - row.entry_price) * exit_qty
             if row.signal_type == "SELL":
                 realized = -realized
-            # Cost this chunk's full round trip (entry + exit legs) up front
-            realized -= round_trip_cost(
+            # Cost this chunk's round trip up front: its share of the original entry
+            # order plus its own exit order (per-order caps applied correctly).
+            realized -= chunk_round_trip_cost(
                 row.entry_price, exit_price, exit_qty,
+                row.original_quantity or row.quantity,
                 row.signal_type, row.strategy == "intraday",
             )
             new_qty = row.quantity - exit_qty
@@ -218,6 +234,17 @@ class PortfolioAgent(BaseAgent):
             elif milestone == "t2":
                 set_clauses += ", t2_booked=1"
             conn.execute(text(f"UPDATE trades SET {set_clauses} WHERE id=:id"), params)
+            # Ledger the chunk with its own timestamp so daily P&L attributes each
+            # booking to the day it actually happened (not the runner's close day).
+            conn.execute(text("""
+                INSERT INTO partial_exits (id, trade_id, symbol, quantity, exit_price,
+                    pnl, reason, exit_time)
+                VALUES (:id, :tid, :sym, :qty, :px, :pnl, :reason, :et)
+            """), {
+                "id": str(uuid.uuid4())[:8], "tid": trade_id, "sym": row.symbol,
+                "qty": exit_qty, "px": exit_price, "pnl": realized, "reason": reason,
+                "et": datetime.now(_IST).isoformat(),
+            })
             conn.commit()
         self.log_info(
             f"Partial exit {trade_id}: {exit_qty} @ ₹{exit_price:.2f} | "
@@ -251,6 +278,17 @@ class PortfolioAgent(BaseAgent):
         with self._engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM trades WHERE status='OPEN'")).fetchall()
         return [dict(r._mapping) for r in rows]
+
+    def _get_open_realized_pnl(self) -> float:
+        """Sum of realized_pnl already booked (T1/T2 partials) on OPEN trades."""
+        try:
+            with self._engine.connect() as conn:
+                val = conn.execute(text(
+                    "SELECT COALESCE(SUM(realized_pnl), 0) FROM trades WHERE status='OPEN'"
+                )).scalar()
+            return float(val or 0.0)
+        except Exception:
+            return 0.0
 
     def get_unrealized_pnl(self, live_prices: Dict[str, float]) -> float:
         """Mark open positions to market. Positions without a quoted price are skipped."""
@@ -286,12 +324,29 @@ class PortfolioAgent(BaseAgent):
     # ── P&L and statistics ─────────────────────────────────────────────────
 
     def get_daily_stats(self) -> dict:
+        """Today's realized P&L, attributing every fill to the day it happened:
+        T1/T2 partial bookings count on their booking day (partial_exits ledger);
+        a trade's final close counts only its runner P&L (pnl minus the partials
+        already attributed), so nothing is double-counted or shifted to close day."""
         today = datetime.now(_IST).strftime("%Y-%m-%d")
         with self._engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT pnl FROM trades WHERE status='CLOSED' AND exit_time LIKE :today"
-            ), {"today": f"{today}%"}).fetchall()
-        daily_pnl = sum(r.pnl for r in rows if r.pnl is not None)
+            # Subtract only LEDGERED partials from each closing trade's pnl — partials
+            # booked before the ledger existed have no rows and stay attributed to the
+            # close day (legacy behaviour) instead of disappearing from daily stats.
+            rows = conn.execute(text("""
+                SELECT t.pnl,
+                       COALESCE((SELECT SUM(p.pnl) FROM partial_exits p
+                                 WHERE p.trade_id = t.id), 0) AS ledgered
+                FROM trades t
+                WHERE t.status='CLOSED' AND t.exit_time LIKE :today
+            """), {"today": f"{today}%"}).fetchall()
+            partial_pnl = conn.execute(text(
+                "SELECT COALESCE(SUM(pnl), 0) FROM partial_exits WHERE exit_time LIKE :today"
+            ), {"today": f"{today}%"}).scalar() or 0.0
+        runner_pnl = sum(
+            (r.pnl or 0) - (r.ledgered or 0) for r in rows if r.pnl is not None
+        )
+        daily_pnl = runner_pnl + partial_pnl
         initial = float(os.getenv("ACCOUNT_SIZE", "100000"))
         return {
             "daily_pnl": round(daily_pnl, 2),
@@ -302,11 +357,15 @@ class PortfolioAgent(BaseAgent):
     def get_performance_stats(self) -> dict:
         df = self.get_trade_history(limit=500)
         initial_capital = float(os.getenv("ACCOUNT_SIZE", "100000"))
+        # Profit already banked by T1/T2 scale-outs on still-open trades is real
+        # cash — equity, available-cash, and live-drawdown checks must see it.
+        open_realized = self._get_open_realized_pnl()
 
         if df.empty:
             return {
                 "total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
-                "current_equity": initial_capital, "max_drawdown_pct": 0.0,
+                "current_equity": round(initial_capital + open_realized, 2),
+                "max_drawdown_pct": 0.0,
                 "sharpe": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
                 "peak_equity": initial_capital,
             }
@@ -314,7 +373,7 @@ class PortfolioAgent(BaseAgent):
         wins = df[df["pnl"] > 0]
         losses = df[df["pnl"] <= 0]
         total_pnl = df["pnl"].sum()
-        current_equity = initial_capital + total_pnl
+        current_equity = initial_capital + total_pnl + open_realized
 
         # Running equity for drawdown calculation
         df_sorted = df.sort_values("exit_time")

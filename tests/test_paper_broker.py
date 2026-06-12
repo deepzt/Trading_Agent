@@ -180,6 +180,37 @@ class TestMissedEodCloseRecovery:
         assert len(temp_portfolio.get_open_positions()) == 1
 
 
+class TestTimeStopScaleOutInteraction:
+    """A position hitting T1 on/after its max-hold day must scale out and keep its
+    runner — the time-stop must not fire off the stale pre-scale-out t1_booked flag."""
+
+    def test_t1_on_max_hold_day_keeps_runner(self, paper_broker, temp_portfolio):
+        paper_broker.execute_signal(_make_signal(), quantity=10)  # swing, max_hold 21d
+        pos = temp_portfolio.get_open_positions()[0]
+        _backdate_entry(temp_portfolio, pos["id"], datetime.now(_IST) - timedelta(days=30))
+
+        # Price above T1 (2900): books the 50% partial; runner must survive the tick
+        closed = paper_broker.check_exits({"RELIANCE": 2910.0})
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "TARGET_1_PARTIAL"
+        open_positions = temp_portfolio.get_open_positions()
+        assert len(open_positions) == 1          # runner NOT time-stopped
+        assert open_positions[0]["quantity"] == 5
+        assert open_positions[0]["t1_booked"] == 1
+
+    def test_time_stop_still_fires_without_t1(self, paper_broker, temp_portfolio):
+        paper_broker.execute_signal(_make_signal(), quantity=10)
+        pos = temp_portfolio.get_open_positions()[0]
+        _backdate_entry(temp_portfolio, pos["id"], datetime.now(_IST) - timedelta(days=30))
+
+        # Price between SL and T1 — stalled trade past max hold must time-stop
+        closed = paper_broker.check_exits({"RELIANCE": 2850.0})
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "TIME_STOP"
+        assert closed[0]["pnl"] is not None
+        assert len(temp_portfolio.get_open_positions()) == 0
+
+
 class TestPortfolioAgent:
     def test_performance_stats_empty(self, temp_portfolio):
         stats = temp_portfolio.get_performance_stats()
@@ -223,3 +254,30 @@ class TestPortfolioAgent:
         assert "available_cash" in funds
         assert "total_equity" in funds
         assert funds["total_equity"] == pytest.approx(100_000.0, rel=0.01)
+
+    def test_partial_booking_counts_in_daily_stats_and_equity(self, temp_portfolio):
+        """A T1 partial booked today on a still-open trade must show up in today's
+        daily P&L and in current equity — not appear out of nowhere on close day."""
+        temp_portfolio.open_position(
+            trade_id="p1", symbol="TCS", signal_type="BUY", strategy="swing",
+            entry_price=4000.0, stop_loss=3920.0, target_1=4080.0, target_2=4160.0,
+            quantity=10, confidence=8.0
+        )
+        booked = temp_portfolio.partial_close("p1", 5, 4080.0, "TARGET_1_PARTIAL", milestone="t1")
+        assert booked is not None and booked > 0
+
+        daily = temp_portfolio.get_daily_stats()
+        assert daily["daily_pnl"] == pytest.approx(booked, abs=0.01)
+        assert daily["trades_today"] == 0  # trade itself is still open
+
+        stats = temp_portfolio.get_performance_stats()
+        assert stats["current_equity"] == pytest.approx(100_000.0 + booked, abs=0.01)
+
+        # Close the runner today too — daily P&L must equal partial + runner exactly
+        runner = temp_portfolio.close_position("p1", 4160.0, "TARGET_2")
+        runner_only = runner - booked  # close_position folds the partial into trade pnl
+        daily = temp_portfolio.get_daily_stats()
+        assert daily["daily_pnl"] == pytest.approx(booked + runner_only, abs=0.01)
+        assert daily["trades_today"] == 1
+        stats = temp_portfolio.get_performance_stats()
+        assert stats["current_equity"] == pytest.approx(100_000.0 + runner, abs=0.01)

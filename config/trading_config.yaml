@@ -55,6 +55,7 @@ strategies:
     rsi_oversold: 35             # RSI must be below this to qualify
     bb_band_tolerance: 0.005     # Allow up to 0.5% above lower Bollinger Band
     min_rr: 1.0                  # Minimum reward/risk ratio to generate signal
+    max_hold_days: 10            # Time-stop: a bounce that hasn't reached T1 in ~2 weeks failed
     # Only activates when regime == VOLATILE (gated in signal_agent.py)
 
   options:

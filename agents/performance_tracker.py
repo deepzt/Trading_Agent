@@ -125,21 +125,30 @@ class PerformanceTracker(BaseAgent):
 
     def compute_momentum_rank(self, raw_data: Dict[str, "pd.DataFrame"]) -> Dict[str, float]:
         """12-1 month sector-neutral momentum rank (0.0–1.0) per symbol.
-        Symbols with insufficient history default to 0.5 (neutral — no filter applied)."""
+
+        Symbols with insufficient history (<252 bars) are EXCLUDED from the sector
+        sort and assigned a neutral RANK of 0.5 directly — never a momentum value.
+        (Putting 0.5 into the momentum dict would be read as a +50% return and rank
+        data-poor symbols at the top of their sector.) Rank 0.5 sits below the 0.6
+        positional gate, so unproven names are conservatively skipped."""
         from strategies.positional import get_sector
 
         momentum: Dict[str, float] = {}
+        no_data: list = []
         for sym, df in raw_data.items():
             if df is None or len(df) < 252:
-                momentum[sym] = 0.5
+                no_data.append(sym)
                 continue
             close_col = "Close" if "Close" in df.columns else "close"
             try:
                 price_252 = float(df[close_col].iloc[-252])
                 price_21 = float(df[close_col].iloc[-21])
-                momentum[sym] = (price_21 - price_252) / price_252 if price_252 > 0 else 0.0
+                if price_252 > 0:
+                    momentum[sym] = (price_21 - price_252) / price_252
+                else:
+                    no_data.append(sym)
             except Exception:
-                momentum[sym] = 0.5
+                no_data.append(sym)
 
         sector_groups: Dict[str, list] = {}
         for sym in momentum:
@@ -152,8 +161,13 @@ class PerformanceTracker(BaseAgent):
             n = len(sorted_syms)
             for i, sym in enumerate(sorted_syms):
                 ranks[sym] = round((i + 1) / n, 2)
+        for sym in no_data:
+            ranks[sym] = 0.5  # neutral rank — insufficient history to claim momentum
 
-        self.log_info(f"Momentum ranks computed for {len(ranks)} symbols across {len(sector_groups)} sectors")
+        self.log_info(
+            f"Momentum ranks computed for {len(ranks)} symbols across "
+            f"{len(sector_groups)} sectors ({len(no_data)} with insufficient history)"
+        )
         return ranks
 
     def run(self, *args, **kwargs):

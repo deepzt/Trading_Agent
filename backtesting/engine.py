@@ -22,7 +22,7 @@ import yaml
 
 from agents.data_agent import DataAgent
 from agents.technical_analysis_agent import TechnicalAnalysisAgent
-from brokers.costs import round_trip_cost
+from brokers.costs import chunk_round_trip_cost
 from monitoring.logger import get_logger
 
 _logger = get_logger("Backtester")
@@ -107,8 +107,15 @@ class BacktestEngine:
         if start_date is None:
             start = datetime.now() - timedelta(days=days)
             start_date = start.strftime("%Y-%m-%d")
+        else:
+            # Make sure the fetch window actually reaches back to the requested start
+            try:
+                span = (datetime.now() - datetime.fromisoformat(start_date)).days
+                days = max(days, span)
+            except ValueError:
+                _logger.warning(f"Unparseable start_date '{start_date}' — using days={days}")
 
-        _logger.info(f"Backtest: {strategy} | {len(symbols)} symbols | from {start_date}")
+        _logger.info(f"Backtest: {strategy} | {len(symbols)} symbols | {start_date} → {end_date or 'now'}")
 
         raw = self._data_agent.run(symbols, timeframe="1d", days=days + 50)
         enriched = self._ta_agent.run(raw)
@@ -116,7 +123,12 @@ class BacktestEngine:
         results = []
         for symbol, df in enriched.items():
             try:
-                result = self._backtest_symbol(symbol, df, strategy)
+                # Indicators are computed on the full fetch (warm history), then the
+                # simulation is restricted to the requested [start_date, end_date] window.
+                sliced = df.loc[start_date:end_date]
+                if sliced.empty:
+                    continue
+                result = self._backtest_symbol(symbol, sliced, strategy)
                 if result:
                     results.append(result)
                     _logger.info(f"{symbol}: return={result.total_return_pct}% sharpe={result.sharpe}")
@@ -156,9 +168,10 @@ class BacktestEngine:
         marks: List[Tuple[object, float]] = []
         trades: List[dict] = []
 
-        def book(entry, px, q):
-            """Net P&L for closing q shares of a long at px, after round-trip costs."""
-            return (px - entry) * q - round_trip_cost(entry, px, q, "BUY", is_intraday)
+        def book(entry, px, q, orig):
+            """Net P&L for closing q of an originally orig-share long at px, after
+            costs (entry order cost pro-rated across chunks, exit chunk in full)."""
+            return (px - entry) * q - chunk_round_trip_cost(entry, px, q, orig, "BUY", is_intraday)
 
         i = 0
         while i < n:
@@ -189,19 +202,19 @@ class BacktestEngine:
             j = i + 1
             while j < n:
                 if low[j] <= cur_sl:
-                    realized += book(entry, cur_sl, remaining)
+                    realized += book(entry, cur_sl, remaining, orig_qty)
                     remaining = 0
                     reason = "STOP_LOSS"
                     break
                 if (not t1_booked) and high[j] >= t1:
                     chunk = min(int(round(orig_qty * t1_pct)), remaining)
                     if chunk >= remaining:
-                        realized += book(entry, t1, remaining)
+                        realized += book(entry, t1, remaining, orig_qty)
                         remaining = 0
                         reason = "TARGET_1"
                         break
                     if chunk >= 1:
-                        realized += book(entry, t1, chunk)
+                        realized += book(entry, t1, chunk, orig_qty)
                         remaining -= chunk
                     t1_booked = True
                     cur_sl = entry      # breakeven
@@ -210,19 +223,19 @@ class BacktestEngine:
                 if t1_booked and (not t2_booked) and high[j] >= t2:
                     chunk = min(int(round(orig_qty * t2_pct)), remaining)
                     if chunk >= remaining:
-                        realized += book(entry, t2, remaining)
+                        realized += book(entry, t2, remaining, orig_qty)
                         remaining = 0
                         reason = "TARGET_2"
                         break
                     if chunk >= 1:
-                        realized += book(entry, t2, chunk)
+                        realized += book(entry, t2, chunk, orig_qty)
                         remaining -= chunk
                     t2_booked = True
                     cur_sl = t1         # trail runner up to T1
                     j += 1
                     continue
                 if ex[j]:
-                    realized += book(entry, close[j], remaining)
+                    realized += book(entry, close[j], remaining, orig_qty)
                     remaining = 0
                     reason = "INDICATOR_EXIT"
                     break
@@ -230,7 +243,7 @@ class BacktestEngine:
 
             if reason is None:           # ran out of data — close at last bar
                 j = n - 1
-                realized += book(entry, close[j], remaining)
+                realized += book(entry, close[j], remaining, orig_qty)
                 reason = "EOD_DATA"
 
             equity += realized

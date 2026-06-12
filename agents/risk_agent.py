@@ -27,6 +27,9 @@ class RiskAgent(BaseAgent):
         self._strategy_stats: dict = {}
         self._raw_data: dict = {}
         self._live_prices: dict = {}
+        # Signals approved earlier in the CURRENT scan — the DB has no positions for
+        # them yet, so sector-exposure and correlation caps must count them explicitly.
+        self._scan_approved: List[Tuple[Signal, int]] = []
 
     def run(self, signals: List[Signal], context: dict = None) -> List[Tuple[Signal, int]]:
         """
@@ -69,6 +72,7 @@ class RiskAgent(BaseAgent):
 
         approved = []
         approved_symbols: set = set()  # track in-scan approvals — DB not updated until execute step
+        self._scan_approved = []       # reset per scan; read by sector/correlation checks
         for signal in signals:
             if open_positions >= max_pos:
                 self.log_info(f"Max positions ({max_pos}) reached, skipping {signal.symbol}")
@@ -84,6 +88,7 @@ class RiskAgent(BaseAgent):
                 if qty >= 1:
                     approved.append((signal, qty))
                     approved_symbols.add(signal.symbol)
+                    self._scan_approved.append((signal, qty))
                     open_positions += 1
                     self.log_info(f"APPROVED {signal.symbol} qty={qty} conf={signal.confidence}", symbol=signal.symbol)
             else:
@@ -179,6 +184,11 @@ class RiskAgent(BaseAgent):
         existing_value = sum(
             p["entry_price"] * p["quantity"]
             for p in open_positions if get_sector(p["symbol"]) == sector
+        )
+        # Include signals already approved in this scan (not yet in the DB)
+        existing_value += sum(
+            s.entry_price * q
+            for s, q in self._scan_approved if get_sector(s.symbol) == sector
         )
         new_value = self._calculate_quantity(signal) * signal.entry_price
         projected_pct = (existing_value + new_value) / account_size * 100
@@ -276,6 +286,9 @@ class RiskAgent(BaseAgent):
             open_syms = [p["symbol"] for p in self._portfolio_agent.get_open_positions()]
         except Exception:
             return True, ""
+        # Include signals already approved in this scan (not yet in the DB) so two
+        # highly-correlated names can't both slip through one flat-book scan
+        open_syms += [s.symbol for s, _ in self._scan_approved]
 
         for sym in open_syms:
             other = self._returns_series(sym, lookback)
