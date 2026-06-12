@@ -160,12 +160,15 @@ class SignalAgent(BaseAgent):
         return round(score * vol_scale, 2)
 
     def _get_recent_signal_symbols(self, hours: int) -> set:
-        """Return symbols that had a signal logged within the last `hours` hours."""
+        """Return symbols with an APPROVED signal in the last `hours` hours.
+        Only approved (executed) signals trigger a cooldown — a rejected/low-confidence
+        signal must not block a clean setup on the same symbol the next scan."""
         cutoff = (datetime.now(_IST) - timedelta(hours=hours)).isoformat()
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(
-                    text("SELECT DISTINCT symbol FROM signals_log WHERE timestamp >= :cutoff"),
+                    text("SELECT DISTINCT symbol FROM signals_log "
+                         "WHERE timestamp >= :cutoff AND status = 'APPROVED'"),
                     {"cutoff": cutoff},
                 ).fetchall()
             return {r[0] for r in rows}
@@ -222,7 +225,7 @@ class SignalAgent(BaseAgent):
             score += 1.5
             reasons.append("Price above EMA50")
 
-        # 4. Volume confirmation — low-volume momentum persists longer (Lee & Swaminathan 2000)
+        # 4. Volume confirmation — a breakout/cross should be backed by above-average volume
         vol_ratio = row.get("volume_ratio", 1.0)
         if vol_ratio and vol_ratio >= 1.5:
             score += 1.5
@@ -230,9 +233,6 @@ class SignalAgent(BaseAgent):
         elif vol_ratio and vol_ratio >= 1.2:
             score += 0.5
             reasons.append(f"Volume +{(vol_ratio-1)*100:.0f}%")
-        elif vol_ratio and 0.5 <= vol_ratio <= 0.9:
-            score += 0.75
-            reasons.append(f"Low-volume momentum (persistent, {vol_ratio:.1f}x)")
 
         # 5. ADX trend strength
         adx = row.get("ADX_14")
@@ -278,9 +278,11 @@ class SignalAgent(BaseAgent):
 
     def _intraday_signal(self, symbol: str, df: pd.DataFrame, composite_ratings: dict, regime: str = "TRENDING") -> Optional[Signal]:
         """Breakout above previous day's high with volume surge."""
+        cfg = self._cfg["strategies"]["intraday"]
+        if not cfg.get("enabled", True):
+            return None  # Intraday screener disabled — uses daily candles, not live intraday bars
         if regime == "CRISIS":
             return None  # No intraday breakout signals during market crisis
-        cfg = self._cfg["strategies"]["intraday"]
         if len(df) < 5:
             return None
         row = df.iloc[-1]
@@ -404,14 +406,12 @@ class SignalAgent(BaseAgent):
             score += 1.0
             reasons.append(f"ADX {adx:.0f}")
 
-        # 6. Volume — low-volume rally = stealthy accumulation (persistent, Lee & Swaminathan 2000)
+        # 6. Volume confirmation — favour a rally backed by participation (turnover-based
+        #    persistence belongs to a multi-month measure, not a single day's ratio)
         vol_ratio = row.get("volume_ratio", 1.0)
-        if vol_ratio and 0.5 <= vol_ratio <= 0.9:
-            score += 0.75
-            reasons.append(f"Low-volume accumulation ({vol_ratio:.1f}x avg — persistent momentum)")
-        elif vol_ratio and vol_ratio >= 2.0:
-            score -= 0.5  # High-volume surge on weekly = likely reverting, not trending
-            reasons.append(f"High-volume caution ({vol_ratio:.1f}x)")
+        if vol_ratio and vol_ratio >= 1.2:
+            score += 0.5
+            reasons.append(f"Volume confirmation ({vol_ratio:.1f}x avg)")
 
         # 7. Composite TA cross-validation
         composite_rating = composite_ratings.get(symbol, "UNKNOWN")

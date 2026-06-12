@@ -62,13 +62,35 @@ class TestPaperBroker:
         assert closed[0]["reason"] == "STOP_LOSS"
         assert closed[0]["pnl"] < 0  # Loss on stop-loss hit
 
-    def test_check_exits_target_2(self, paper_broker, temp_portfolio):
+    def test_check_exits_partial_scale_out(self, paper_broker, temp_portfolio):
+        """Price above both targets scales out in stages: T1 partial (50%) first tick,
+        T2 partial (25%) next tick, leaving a 25% runner trailed to T1."""
         sig = _make_signal()
         paper_broker.execute_signal(sig, quantity=10)
+
+        # Tick 1: books 50% (5 shares) at T1, trails SL to breakeven
         closed = paper_broker.check_exits({"RELIANCE": 2970.0})  # Above T2 of 2960
         assert len(closed) == 1
-        assert closed[0]["reason"] == "TARGET_2"
-        assert closed[0]["pnl"] > 0  # Profit on target hit
+        assert closed[0]["reason"] == "TARGET_1_PARTIAL"
+        assert closed[0]["pnl"] > 0
+        pos = temp_portfolio.get_open_positions()[0]
+        assert pos["quantity"] == 5          # 5 booked, 5 remain
+        assert pos["t1_booked"] == 1
+
+        # Tick 2: books 25% (2 shares) at T2, trails SL to T1 — 3-share runner remains
+        closed = paper_broker.check_exits({"RELIANCE": 2970.0})
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "TARGET_2_PARTIAL"
+        pos = temp_portfolio.get_open_positions()[0]
+        assert pos["quantity"] == 3
+        assert pos["t2_booked"] == 1
+        assert pos["stop_loss"] == pytest.approx(2900.0)  # trailed up to T1
+
+        # Runner exits when price falls back to the trailed stop (now at T1)
+        closed = paper_broker.check_exits({"RELIANCE": 2895.0})
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "STOP_LOSS"
+        assert len(temp_portfolio.get_open_positions()) == 0
 
     def test_no_exit_when_price_between_sl_and_t1(self, paper_broker, temp_portfolio):
         sig = _make_signal()
@@ -93,7 +115,11 @@ class TestPortfolioAgent:
         assert len(positions) == 1
 
         pnl = temp_portfolio.close_position("test-1", 4100.0, "TARGET_1")
-        assert pnl == pytest.approx(500.0, rel=0.01)  # (4100-4000)*5
+        # (4100-4000)*5 = 500 gross, less realistic round-trip transaction costs
+        from brokers.costs import round_trip_cost
+        expected = 500.0 - round_trip_cost(4000.0, 4100.0, 5, "BUY", is_intraday=False)
+        assert pnl == pytest.approx(expected, rel=0.01)
+        assert 440.0 < pnl < 500.0
 
         positions = temp_portfolio.get_open_positions()
         assert len(positions) == 0

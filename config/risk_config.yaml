@@ -5,16 +5,31 @@ account:
   currency: "INR"
 
 position_sizing:
-  method: "fixed_fractional"        # "fixed_fractional" or "kelly"
-  risk_per_trade_pct: 2.0           # Risk 2% of account per trade
+  method: "kelly"                   # "fixed_fractional" or "kelly"
+  risk_per_trade_pct: 2.0           # Base risk per trade (applies at reference confidence)
   kelly_fraction: 0.25              # Quarter Kelly (if using kelly method)
+  kelly_min_trades: 20              # Need this many closed trades before Kelly engages
+  min_risk_per_trade_pct: 0.5       # Floor on per-trade risk after all adjustments
+  max_risk_per_trade_pct: 3.0       # Ceiling on per-trade risk after all adjustments
   max_position_pct: 10.0            # Max 10% of account in a single stock
   min_quantity: 1                   # Min shares to trade
+  # Conviction sizing — scale risk with signal confidence above the reference
+  conviction_sizing: true
+  conviction_ref_confidence: 7.0    # risk_per_trade_pct applies at this confidence
+  conviction_max_confidence: 10.0
+  conviction_max_multiplier: 1.25   # up to 1.25× base risk at max confidence
 
 portfolio_limits:
   max_open_positions: 5             # Max simultaneous trades
   max_sector_exposure_pct: 30.0     # Max 30% in one sector
   max_intraday_positions: 3         # Max intraday positions at once
+  max_correlation: 0.7              # Reject a signal correlated above this to a holding
+  correlation_lookback_days: 120    # Trailing window for the correlation estimate
+
+regime_risk:
+  volatile_risk_multiplier: 0.5     # Halve per-trade risk in VOLATILE regime
+  volatile_max_positions: 3         # Tighter simultaneous-position cap in VOLATILE
+  crisis_block_new: true            # Block all new swing/positional entries in CRISIS
 
 stop_loss:
   atr_multiplier: 1.5               # SL = entry ± (1.5 × ATR)
@@ -26,8 +41,8 @@ stop_loss:
 targets:
   t1_rr_ratio: 1.0                  # Target 1 at 1:1 risk-reward
   t2_rr_ratio: 2.0                  # Target 2 at 1:2 risk-reward
-  t1_exit_pct: 50                   # Exit 50% of position at T1
-  t2_exit_pct: 50                   # Exit remaining 50% at T2
+  t1_exit_pct: 50                   # Book 50% of the original position at T1 (lock breakeven)
+  t2_exit_pct: 25                   # Book 25% at T2; trail the remaining 25% runner up to T1
 
 daily_limits:
   max_daily_loss_pct: 5.0           # Halt trading if day's P&L < -5%

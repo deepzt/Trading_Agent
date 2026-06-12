@@ -8,7 +8,14 @@ from __future__ import annotations
 import os
 import random
 import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+import pytz
+import yaml
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 from agents.signal_agent import Signal
 from brokers.base_broker import BaseBroker
@@ -23,6 +30,50 @@ class PaperBroker(BaseBroker):
     def __init__(self, portfolio_agent):
         self._portfolio = portfolio_agent
         self._orders: dict = {}  # order_id → order_dict
+        # Partial-exit scale-out percentages (of original position) from risk config
+        self._t1_exit_pct, self._t2_exit_pct = self._load_exit_pcts()
+        # Per-strategy time-stop windows (calendar days) from trading config
+        self._max_hold = self._load_max_hold()
+
+    @staticmethod
+    def _load_max_hold() -> dict:
+        try:
+            cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
+            with open(cfg_path) as f:
+                strategies = yaml.safe_load(f).get("strategies", {})
+            out = {}
+            for name, scfg in strategies.items():
+                if isinstance(scfg, dict) and scfg.get("max_hold_days"):
+                    out[name] = int(scfg["max_hold_days"])
+            return out
+        except Exception as e:
+            _logger.warning(f"Could not load max_hold_days: {e}")
+            return {}
+
+    def _exceeded_max_hold(self, strategy: str, entry_time: str) -> bool:
+        """True if a position has been held past its strategy's max-hold window."""
+        max_days = self._max_hold.get(strategy)
+        if not max_days or not entry_time:
+            return False
+        try:
+            entry_dt = datetime.fromisoformat(entry_time)
+            if entry_dt.tzinfo is None:
+                entry_dt = _IST.localize(entry_dt)
+            return (datetime.now(_IST) - entry_dt).days >= max_days
+        except Exception:
+            return False
+
+    @staticmethod
+    def _load_exit_pcts() -> tuple:
+        try:
+            cfg_path = Path(__file__).parent.parent / "config" / "risk_config.yaml"
+            with open(cfg_path) as f:
+                targets = yaml.safe_load(f).get("targets", {})
+            return (float(targets.get("t1_exit_pct", 50)),
+                    float(targets.get("t2_exit_pct", 25)))
+        except Exception as e:
+            _logger.warning(f"Could not load exit pcts: {e} — defaulting 50/25")
+            return 50.0, 25.0
 
     def execute_signal(self, signal: Signal, quantity: int) -> Optional[str]:
         """High-level: place order for an approved signal and open position."""
@@ -75,9 +126,14 @@ class PaperBroker(BaseBroker):
             sl = pos["stop_loss"]
             t1 = pos["target_1"]
             t2 = pos["target_2"]
+            entry = pos["entry_price"]
             signal_type = pos["signal_type"]
+            qty = pos["quantity"]
+            orig_qty = pos.get("original_quantity") or qty
+            t1_booked = bool(pos.get("t1_booked"))
+            t2_booked = bool(pos.get("t2_booked"))
 
-            # Use day high/low to catch T2 hits that occurred between monitor ticks
+            # Use day high/low to catch hits that occurred between monitor ticks
             d_high = (day_highs or {}).get(symbol, price)
             d_low = (day_lows or {}).get(symbol, price)
 
@@ -86,31 +142,82 @@ class PaperBroker(BaseBroker):
 
             if signal_type == "BUY":
                 if d_low <= sl:
+                    # Full close: hard stop, breakeven stop (post-T1), or T1-trailed stop (post-T2)
                     exit_price, reason = sl, "STOP_LOSS"
-                elif d_high >= t2:
-                    exit_price, reason = t2, "TARGET_2"
-                elif d_high >= t1:
+                elif (not t1_booked) and d_high >= t1:
                     if self._is_reversal_at_t1(symbol, ta_data):
                         exit_price, reason = t1, "TARGET_1_REVERSAL"
-                        _logger.info(f"{symbol}: reversal detected at T1 — booking profit @ ₹{t1:.2f}")
+                        _logger.info(f"{symbol}: reversal detected at T1 — booking full @ ₹{t1:.2f}")
                     else:
-                        entry = pos["entry_price"]
-                        self._portfolio.update_stop_loss(trade_id, entry)
-                        _logger.info(f"{symbol}: T1 hit — SL trailed to breakeven @ ₹{entry:.2f}")
+                        # Scale out at T1 and trail the stop to breakeven on the remainder
+                        self._scale_out(closed, trade_id, symbol, orig_qty, qty, t1,
+                                        self._t1_exit_pct, "t1", "TARGET_1_PARTIAL",
+                                        new_sl=entry, sl_label="breakeven")
+                elif t1_booked and (not t2_booked) and d_high >= t2:
+                    # Scale out at T2 and trail the stop up to T1 — let the rest run
+                    self._scale_out(closed, trade_id, symbol, orig_qty, qty, t2,
+                                    self._t2_exit_pct, "t2", "TARGET_2_PARTIAL",
+                                    new_sl=t1, sl_label="T1")
                 elif self._should_exit_on_indicators(symbol, pos.get("strategy"), ta_data):
                     exit_price, reason = price, "INDICATOR_EXIT"
                     _logger.info(f"{symbol}: indicator exit — EMA bearish + MACD negative @ ₹{price:.2f}")
             elif signal_type == "SELL":
                 if d_high >= sl:
                     exit_price, reason = sl, "STOP_LOSS"
-                elif d_low <= t2:
-                    exit_price, reason = t2, "TARGET_2"
+                elif (not t1_booked) and d_low <= t1:
+                    self._scale_out(closed, trade_id, symbol, orig_qty, qty, t1,
+                                    self._t1_exit_pct, "t1", "TARGET_1_PARTIAL",
+                                    new_sl=entry, sl_label="breakeven")
+                elif t1_booked and (not t2_booked) and d_low <= t2:
+                    self._scale_out(closed, trade_id, symbol, orig_qty, qty, t2,
+                                    self._t2_exit_pct, "t2", "TARGET_2_PARTIAL",
+                                    new_sl=t1, sl_label="T1")
+
+            # Time-stop — exit a stalled position that hasn't reached T1 within its window.
+            # Trades that already booked T1 are left to ride their trailed stop.
+            if (exit_price is None and not t1_booked
+                    and self._exceeded_max_hold(pos.get("strategy"), pos.get("entry_time"))):
+                exit_price, reason = price, "TIME_STOP"
+                _logger.info(f"{symbol}: time-stop — held past max window without T1, exit @ ₹{price:.2f}")
 
             if exit_price and reason:
                 pnl = self._portfolio.close_position(trade_id, exit_price, reason)
                 closed.append({"symbol": symbol, "reason": reason, "pnl": pnl})
 
         return closed
+
+    def _scale_out(self, closed: list, trade_id: str, symbol: str, orig_qty: int, qty: int,
+                   target_price: float, pct: float, milestone: str, reason: str,
+                   new_sl: float, sl_label: str) -> None:
+        """
+        Book a partial profit at a target and trail the stop on the remainder.
+        Falls back to a full close if the scale-out would consume the whole position,
+        or just advances state + trails the stop if the position is too small to split.
+        """
+        exit_qty = int(round(orig_qty * pct / 100.0))
+
+        if exit_qty >= qty:
+            # Nothing worth keeping as a runner — close the remainder fully at the target
+            full_reason = reason.replace("_PARTIAL", "")
+            pnl = self._portfolio.close_position(trade_id, target_price, full_reason)
+            closed.append({"symbol": symbol, "reason": full_reason, "pnl": pnl})
+            _logger.info(f"{symbol}: {full_reason} — closed remaining {qty} @ ₹{target_price:.2f}")
+            return
+
+        if exit_qty < 1:
+            # Position too small to split — advance the milestone and trail the stop only
+            self._portfolio.partial_close(trade_id, 0, target_price, reason, milestone)
+            self._portfolio.update_stop_loss(trade_id, new_sl)
+            _logger.info(f"{symbol}: {milestone.upper()} reached (too small to scale) — SL → {sl_label}")
+            return
+
+        realized = self._portfolio.partial_close(trade_id, exit_qty, target_price, reason, milestone)
+        self._portfolio.update_stop_loss(trade_id, new_sl)
+        closed.append({"symbol": symbol, "reason": reason, "pnl": realized})
+        _logger.info(
+            f"{symbol}: {reason} — booked {exit_qty}/{orig_qty} @ ₹{target_price:.2f}, "
+            f"SL trailed to {sl_label} (₹{new_sl:.2f})"
+        )
 
     def _is_reversal_at_t1(self, symbol: str, ta_data: dict) -> bool:
         """

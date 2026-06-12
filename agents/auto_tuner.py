@@ -20,8 +20,7 @@ _IST = pytz.timezone("Asia/Kolkata")
 
 class AutoTuner(BaseAgent):
     TUNE_MIN_TRADES = 10    # Minimum trades before adjusting a strategy's threshold
-    TUNE_LOW_WR = 40.0      # Win rate below this → raise threshold (be more selective)
-    TUNE_HIGH_WR = 65.0     # Win rate above this → lower threshold (capture more signals)
+    TUNE_HIGH_WR = 65.0     # With positive expectancy AND win rate above this → loosen
     TUNE_STEP_UP = 0.5      # How much to raise threshold per run
     TUNE_STEP_DOWN = 0.3    # How much to lower threshold per run
     THRESHOLD_MIN = 5.0
@@ -48,6 +47,9 @@ class AutoTuner(BaseAgent):
                 continue
 
             wr = stats["win_rate"]
+            expectancy = stats.get("avg_pnl", 0.0)   # signed ₹/trade = realized expectancy
+            avg_r = stats.get("avg_r", 0.0)
+            n = stats["total_trades"]
             current = state["threshold_overrides"].get(strategy, None)
 
             from pathlib import Path as _P
@@ -58,18 +60,31 @@ class AutoTuner(BaseAgent):
             default = float(cfg["signals"]["min_confidence_for_claude"])
             baseline = current if current is not None else default
 
-            if wr < self.TUNE_LOW_WR:
+            # Tune on expectancy, not win rate alone: a high-win-rate strategy can still
+            # be net-negative (few big losers), and a low-win-rate strategy can be highly
+            # profitable (fat winners). Win rate only decides how aggressively to loosen.
+            if expectancy < 0:
+                # Losing money on average → be more selective regardless of win rate
                 new_val = round(min(baseline + self.TUNE_STEP_UP, self.THRESHOLD_MAX), 1)
                 if new_val != baseline:
-                    reason = f"Win rate {wr}% below {self.TUNE_LOW_WR}% threshold ({stats['total_trades']} trades)"
+                    reason = (f"Negative expectancy ₹{expectancy}/trade "
+                              f"(WR {wr}%, {avg_r}R avg, {n} trades)")
                     actions.append(self._record_action(state, strategy, baseline, new_val, reason))
-            elif wr > self.TUNE_HIGH_WR:
+                else:
+                    self.log_info(f"{strategy}: negative expectancy but threshold already at cap")
+            elif expectancy > 0 and wr > self.TUNE_HIGH_WR:
+                # Profitable and hitting frequently → loosen to capture more signals
                 new_val = round(max(baseline - self.TUNE_STEP_DOWN, self.THRESHOLD_MIN), 1)
                 if new_val != baseline:
-                    reason = f"Win rate {wr}% above {self.TUNE_HIGH_WR}% threshold ({stats['total_trades']} trades)"
+                    reason = (f"Profitable ₹{expectancy}/trade at {wr}% WR > {self.TUNE_HIGH_WR}% "
+                              f"({avg_r}R avg, {n} trades)")
                     actions.append(self._record_action(state, strategy, baseline, new_val, reason))
+                else:
+                    self.log_info(f"{strategy}: profitable but threshold already at floor")
             else:
-                self.log_info(f"{strategy}: WR {wr}% in healthy range — no threshold change")
+                self.log_info(
+                    f"{strategy}: expectancy ₹{expectancy}/trade, WR {wr}% — no threshold change"
+                )
 
         state["ai_context"] = ai_context
         state["last_updated"] = datetime.now(_IST).isoformat()

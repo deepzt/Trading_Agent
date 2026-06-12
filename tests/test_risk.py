@@ -11,7 +11,7 @@ from agents.risk_agent import RiskAgent
 from agents.signal_agent import Signal
 
 
-def _make_signal(entry=1000.0, stop=970.0, t1=1030.0, t2=1060.0, conf=8.0) -> Signal:
+def _make_signal(entry=1000.0, stop=970.0, t1=1030.0, t2=1060.0, conf=7.0) -> Signal:
     return Signal(
         symbol="TESTCO", signal_type="BUY", strategy="swing",
         entry_price=entry, stop_loss=stop,

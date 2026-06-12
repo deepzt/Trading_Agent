@@ -55,6 +55,8 @@ class PerformanceTracker(BaseAgent):
                 "losses": len(losses),
                 "avg_pnl": avg_pnl,
                 "avg_r": avg_r,
+                "avg_win": round(wins["pnl"].mean(), 2) if not wins.empty else 0.0,
+                "avg_loss": round(losses["pnl"].mean(), 2) if not losses.empty else 0.0,
             }
         return result
 

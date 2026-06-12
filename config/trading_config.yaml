@@ -19,6 +19,8 @@ strategies:
     # - options      # Uncomment when F&O data is set up
 
   intraday:
+    enabled: false                  # DISABLED: breakout is computed from daily candles, not
+                                    # live intraday bars — re-enable once a true 5/15m loop exists
     timeframe: "15m"
     lookback_days: 5
     breakout_buffer_pct: 0.002      # 0.2% above breakout level
@@ -38,6 +40,7 @@ strategies:
     rsi_min: 40
     rsi_max: 65
     min_adx: 20                     # Trend strength filter
+    max_hold_days: 21              # Time-stop: exit if T1 not reached within ~3 weeks
 
   positional:
     timeframe: "1wk"
@@ -46,6 +49,7 @@ strategies:
     rsi_min: 45
     rsi_max: 70
     min_holding_days: 15
+    max_hold_days: 84              # Time-stop: exit if T1 not reached within ~12 weeks
 
   mean_reversion:
     rsi_oversold: 35             # RSI must be below this to qualify

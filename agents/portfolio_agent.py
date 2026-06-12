@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from agents.base_agent import BaseAgent
+from brokers.costs import round_trip_cost
 
 _IST = pytz.timezone("Asia/Kolkata")
 
@@ -29,6 +30,10 @@ CREATE TABLE IF NOT EXISTS trades (
     target_1 REAL NOT NULL,
     target_2 REAL NOT NULL,
     quantity INTEGER NOT NULL,
+    original_quantity INTEGER,
+    t1_booked INTEGER DEFAULT 0,
+    t2_booked INTEGER DEFAULT 0,
+    realized_pnl REAL DEFAULT 0,
     status TEXT DEFAULT 'OPEN',
     exit_price REAL,
     pnl REAL,
@@ -99,6 +104,26 @@ class PortfolioAgent(BaseAgent):
                     conn.execute(text(f"ALTER TABLE signals_log ADD COLUMN {col} {col_type}"))
                 except Exception:
                     pass  # Column already exists
+            # Migrate trades table — partial-exit tracking columns for older DBs
+            _trade_cols = [
+                ("original_quantity", "INTEGER"),
+                ("t1_booked", "INTEGER DEFAULT 0"),
+                ("t2_booked", "INTEGER DEFAULT 0"),
+                ("realized_pnl", "REAL DEFAULT 0"),
+            ]
+            for col, col_type in _trade_cols:
+                try:
+                    conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {col_type}"))
+                except Exception:
+                    pass  # Column already exists
+            # Backfill original_quantity for pre-existing open rows
+            try:
+                conn.execute(text(
+                    "UPDATE trades SET original_quantity = quantity "
+                    "WHERE original_quantity IS NULL"
+                ))
+            except Exception:
+                pass
             conn.commit()
 
     # ── Position management ────────────────────────────────────────────────
@@ -109,8 +134,10 @@ class PortfolioAgent(BaseAgent):
         with self._engine.connect() as conn:
             conn.execute(text("""
                 INSERT INTO trades (id, symbol, signal_type, strategy, entry_price, stop_loss,
-                    target_1, target_2, quantity, status, entry_time, confidence, claude_verdict)
-                VALUES (:id, :sym, :stype, :strat, :ep, :sl, :t1, :t2, :qty, 'OPEN', :et, :conf, :cv)
+                    target_1, target_2, quantity, original_quantity, t1_booked, t2_booked,
+                    realized_pnl, status, entry_time, confidence, claude_verdict)
+                VALUES (:id, :sym, :stype, :strat, :ep, :sl, :t1, :t2, :qty, :qty, 0, 0,
+                    0, 'OPEN', :et, :conf, :cv)
             """), {
                 "id": trade_id, "sym": symbol, "stype": signal_type, "strat": strategy,
                 "ep": entry_price, "sl": stop_loss, "t1": target_1, "t2": target_2,
@@ -130,6 +157,15 @@ class PortfolioAgent(BaseAgent):
             pnl = (exit_price - row.entry_price) * row.quantity
             if row.signal_type == "SELL":
                 pnl = -pnl
+            # Deduct realistic round-trip transaction costs on the remaining quantity
+            # (each partial chunk is costed separately when it scales out).
+            pnl -= round_trip_cost(
+                row.entry_price, exit_price, row.quantity,
+                row.signal_type, row.strategy == "intraday",
+            )
+            # Fold in profit already booked from T1/T2 partial scale-outs so the
+            # trade's recorded P&L reflects the entire position, not just the runner.
+            pnl += (row.realized_pnl or 0)
             conn.execute(text("""
                 UPDATE trades SET status='CLOSED', exit_price=:ep, pnl=:pnl,
                     exit_time=:et, exit_reason=:reason WHERE id=:id
@@ -141,6 +177,54 @@ class PortfolioAgent(BaseAgent):
             conn.commit()
         self.log_info(f"Closed {trade_id}: P&L ₹{pnl:.2f} ({reason})", trade_id=trade_id)
         return pnl
+
+    def partial_close(self, trade_id: str, exit_qty: int, exit_price: float,
+                      reason: str = "PARTIAL", milestone: str = None) -> Optional[float]:
+        """
+        Scale out part of an open position (T1/T2 profit booking).
+        Reduces the open quantity, accrues the booked profit into realized_pnl,
+        and optionally flags a milestone ('t1' or 't2') so it isn't re-booked.
+        Returns the realized P&L of this partial, or None if no open position.
+        """
+        with self._engine.connect() as conn:
+            row = conn.execute(text("SELECT * FROM trades WHERE id = :id AND status = 'OPEN'"),
+                               {"id": trade_id}).fetchone()
+            if not row:
+                return None
+            exit_qty = min(int(exit_qty), int(row.quantity))
+            if exit_qty <= 0:
+                # Nothing to book (position too small to split) — but still flag the
+                # milestone if asked so the exit state machine doesn't re-trigger.
+                if milestone in ("t1", "t2"):
+                    col = "t1_booked" if milestone == "t1" else "t2_booked"
+                    conn.execute(text(f"UPDATE trades SET {col}=1 WHERE id=:id"), {"id": trade_id})
+                    conn.commit()
+                return 0.0
+            realized = (exit_price - row.entry_price) * exit_qty
+            if row.signal_type == "SELL":
+                realized = -realized
+            # Cost this chunk's full round trip (entry + exit legs) up front
+            realized -= round_trip_cost(
+                row.entry_price, exit_price, exit_qty,
+                row.signal_type, row.strategy == "intraday",
+            )
+            new_qty = row.quantity - exit_qty
+            new_realized = (row.realized_pnl or 0) + realized
+
+            set_clauses = "quantity=:q, realized_pnl=:rp"
+            params = {"q": new_qty, "rp": new_realized, "id": trade_id}
+            if milestone == "t1":
+                set_clauses += ", t1_booked=1"
+            elif milestone == "t2":
+                set_clauses += ", t2_booked=1"
+            conn.execute(text(f"UPDATE trades SET {set_clauses} WHERE id=:id"), params)
+            conn.commit()
+        self.log_info(
+            f"Partial exit {trade_id}: {exit_qty} @ ₹{exit_price:.2f} | "
+            f"booked ₹{realized:.2f} ({reason}); {new_qty} left",
+            trade_id=trade_id,
+        )
+        return realized
 
     def update_stop_loss(self, trade_id: str, new_sl: float):
         with self._engine.connect() as conn:
@@ -167,6 +251,19 @@ class PortfolioAgent(BaseAgent):
         with self._engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM trades WHERE status='OPEN'")).fetchall()
         return [dict(r._mapping) for r in rows]
+
+    def get_unrealized_pnl(self, live_prices: Dict[str, float]) -> float:
+        """Mark open positions to market. Positions without a quoted price are skipped."""
+        total = 0.0
+        for p in self.get_open_positions():
+            price = live_prices.get(p["symbol"])
+            if price is None:
+                continue
+            pnl = (price - p["entry_price"]) * p["quantity"]
+            if p["signal_type"] == "SELL":
+                pnl = -pnl
+            total += pnl
+        return round(total, 2)
 
     def get_available_cash(self) -> float:
         """Equity minus capital tied up in open positions (unrealized exposure deducted)."""
@@ -211,6 +308,7 @@ class PortfolioAgent(BaseAgent):
                 "total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
                 "current_equity": initial_capital, "max_drawdown_pct": 0.0,
                 "sharpe": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+                "peak_equity": initial_capital,
             }
 
         wins = df[df["pnl"] > 0]
@@ -243,6 +341,7 @@ class PortfolioAgent(BaseAgent):
             "sharpe": sharpe,
             "avg_win": round(wins["pnl"].mean(), 2) if not wins.empty else 0.0,
             "avg_loss": round(losses["pnl"].mean(), 2) if not losses.empty else 0.0,
+            "peak_equity": round(float(peak.max()), 2),
         }
 
     def log_signal(self, signal_dict: dict):

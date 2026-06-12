@@ -45,6 +45,7 @@ class TradingState(TypedDict):
     sentiment: Dict[str, Any]
     composite_ratings: Dict[str, str]
     perf_context: str
+    strategy_stats: Dict[str, Any]
     tuning_actions: List[Any]
     portfolio_stats: Dict[str, Any]
     closed_today: List[Any]
@@ -135,6 +136,7 @@ def compute_performance(state: TradingState) -> TradingState:
     df = portfolio.get_trade_history(limit=500)
     strategy_stats = tracker.compute_strategy_stats(df)
     symbol_stats = tracker.compute_symbol_stats(df)
+    state["strategy_stats"] = strategy_stats
     state["perf_context"] = tracker.build_ai_context(strategy_stats, symbol_stats)
     try:
         state["momentum_ranks"] = tracker.compute_momentum_rank(state.get("raw_data", {}))
@@ -182,6 +184,21 @@ def generate_signals(state: TradingState) -> TradingState:
         regime=state.get("regime", "TRENDING"),
         momentum_ranks=state.get("momentum_ranks", {}),
     )
+
+    # Ensure Claude validation has news context for the symbols we actually signalled —
+    # the early sentiment pass only covered the first 20 watchlist names (#17).
+    sentiment = state.get("sentiment", {})
+    missing = sorted({s.symbol for s in state["signals"] if s.symbol not in sentiment})
+    if missing:
+        try:
+            extra = SentimentAgent().run(missing)
+            for sym, data in extra.items():
+                if sym != "_market":
+                    sentiment[sym] = data
+            state["sentiment"] = sentiment
+            _logger.info(f"Fetched news sentiment for {len(missing)} signalled symbol(s)")
+        except Exception as e:
+            _logger.warning(f"Signalled-symbol sentiment fetch failed: {e}")
     return state
 
 
@@ -211,6 +228,9 @@ def check_risk(state: TradingState) -> TradingState:
     context = {
         "earnings_blackout_symbols": state.get("earnings_blackout_symbols", []),
         "expiry_context": state.get("expiry_context", {"expiry_risk": "NONE"}),
+        "regime": state.get("regime", "TRENDING"),
+        "strategy_stats": state.get("strategy_stats", {}),
+        "raw_data": state.get("raw_data", {}),
     }
     approved_with_qty = agent.run(
         [s for s in state["validated_signals"] if s.status == "APPROVED"],
@@ -460,7 +480,7 @@ class TradingScheduler:
             "raw_data": {}, "enriched_data": {},
             "signals": [], "validated_signals": [],
             "approved_trades": [], "sentiment": {}, "composite_ratings": {},
-            "perf_context": "", "tuning_actions": [],
+            "perf_context": "", "strategy_stats": {}, "tuning_actions": [],
             "portfolio_stats": {}, "closed_today": [], "errors": [],
             "regime": "TRENDING",
             "earnings_blackout_symbols": [],

@@ -119,8 +119,11 @@ class ClaudeValidationAgent(BaseAgent):
             if result:
                 signal.claude_verdict = result.get("verdict", "REJECT")
                 signal.claude_reasoning = result.get("reasoning", "")
+                # Keep the rules-engine score dominant; the LLM's self-reported
+                # confidence is uncalibrated, so it only nudges (30% weight) rather
+                # than averaging 50/50 and dragging strong rules signals to the mean.
                 adjusted_conf = result.get("confidence", signal.confidence)
-                signal.confidence = round((signal.confidence + adjusted_conf) / 2, 1)
+                signal.confidence = round(0.7 * signal.confidence + 0.3 * adjusted_conf, 1)
 
                 if result.get("modified_stop_loss"):
                     signal.stop_loss = round(float(result["modified_stop_loss"]), 2)
