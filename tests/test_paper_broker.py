@@ -3,14 +3,19 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
+import pytz
+from sqlalchemy import text
 
 from agents.portfolio_agent import PortfolioAgent
 from agents.signal_agent import Signal
 from brokers.paper_broker import PaperBroker
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 
 @pytest.fixture
@@ -97,6 +102,82 @@ class TestPaperBroker:
         paper_broker.execute_signal(sig, quantity=10)
         closed = paper_broker.check_exits({"RELIANCE": 2850.0})  # Between SL and T2
         assert len(closed) == 0  # No exit triggered
+
+
+def _make_intraday_signal() -> Signal:
+    return Signal(
+        symbol="INFY", signal_type="BUY", strategy="intraday",
+        entry_price=1500.0, stop_loss=1480.0,
+        target_1=1520.0, target_2=1540.0,
+        confidence=8.0, reasons=["breakout"]
+    )
+
+
+def _backdate_entry(portfolio, trade_id: str, entry_dt) -> None:
+    with portfolio._engine.connect() as conn:
+        conn.execute(text("UPDATE trades SET entry_time = :et WHERE id = :id"),
+                     {"et": entry_dt.isoformat(), "id": trade_id})
+        conn.commit()
+
+
+def _freeze_now(monkeypatch, fixed_dt):
+    """Pin brokers.paper_broker.datetime.now() to fixed_dt (IST-aware)."""
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_dt if tz else fixed_dt.replace(tzinfo=None)
+    monkeypatch.setattr("brokers.paper_broker.datetime", _FrozenDateTime)
+
+
+class TestMissedEodCloseRecovery:
+    """Startup recovery for intraday positions left open by a missed 3:20 PM close."""
+
+    def test_previous_day_position_closed_late(self, paper_broker, temp_portfolio, monkeypatch):
+        paper_broker.execute_signal(_make_intraday_signal(), quantity=10)
+        pos = temp_portfolio.get_open_positions()[0]
+        yesterday = datetime.now(_IST) - timedelta(days=1)
+        _backdate_entry(temp_portfolio, pos["id"], yesterday.replace(hour=9, minute=30))
+        # Next morning, before today's 3:20 PM — stale position must still close
+        _freeze_now(monkeypatch, datetime.now(_IST).replace(hour=10, minute=0))
+
+        closed = paper_broker.close_intraday_eod({"INFY": 1505.0}, stale_only=True)
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "EOD_CLOSE_LATE"
+        assert len(temp_portfolio.get_open_positions()) == 0
+
+    def test_todays_position_kept_before_close_time(self, paper_broker, temp_portfolio, monkeypatch):
+        paper_broker.execute_signal(_make_intraday_signal(), quantity=10)
+        pos = temp_portfolio.get_open_positions()[0]
+        today_morning = datetime.now(_IST).replace(hour=9, minute=30)
+        _backdate_entry(temp_portfolio, pos["id"], today_morning)
+        _freeze_now(monkeypatch, datetime.now(_IST).replace(hour=11, minute=0))
+
+        closed = paper_broker.close_intraday_eod({"INFY": 1505.0}, stale_only=True)
+        assert len(closed) == 0
+        assert len(temp_portfolio.get_open_positions()) == 1
+
+    def test_todays_position_closed_after_close_time(self, paper_broker, temp_portfolio, monkeypatch):
+        paper_broker.execute_signal(_make_intraday_signal(), quantity=10)
+        pos = temp_portfolio.get_open_positions()[0]
+        today_morning = datetime.now(_IST).replace(hour=9, minute=30)
+        _backdate_entry(temp_portfolio, pos["id"], today_morning)
+        # Restart at 3:45 PM, after the missed 3:20 close
+        _freeze_now(monkeypatch, datetime.now(_IST).replace(hour=15, minute=45))
+
+        closed = paper_broker.close_intraday_eod({"INFY": 1505.0}, stale_only=True)
+        assert len(closed) == 1
+        assert closed[0]["reason"] == "EOD_CLOSE_LATE"
+
+    def test_stale_only_skips_non_intraday(self, paper_broker, temp_portfolio, monkeypatch):
+        paper_broker.execute_signal(_make_signal(), quantity=10)  # swing position
+        pos = temp_portfolio.get_open_positions()[0]
+        yesterday = datetime.now(_IST) - timedelta(days=1)
+        _backdate_entry(temp_portfolio, pos["id"], yesterday)
+        _freeze_now(monkeypatch, datetime.now(_IST).replace(hour=10, minute=0))
+
+        closed = paper_broker.close_intraday_eod({"RELIANCE": 2850.0}, stale_only=True)
+        assert len(closed) == 0
+        assert len(temp_portfolio.get_open_positions()) == 1
 
 
 class TestPortfolioAgent:

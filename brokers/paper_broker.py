@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import random
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +16,7 @@ import pytz
 import yaml
 
 _IST = pytz.timezone("Asia/Kolkata")
+_EOD_CLOSE_IST = time(15, 20)  # must match the EOD-close cron in orchestrator/workflow.py
 
 from agents.signal_agent import Signal
 from brokers.base_broker import BaseBroker
@@ -278,15 +279,40 @@ class PaperBroker(BaseBroker):
 
         return ema_bearish and macd_weak
 
-    def close_intraday_eod(self, live_prices: dict) -> list:
+    @staticmethod
+    def _missed_eod_close(entry_time: str) -> bool:
+        """True if an open intraday position's 3:20 PM EOD close has already passed:
+        entered on a previous day, or entered today with IST now past the close time.
+        Unparseable entry times return False — never force-close blind."""
+        if not entry_time:
+            return False
+        try:
+            entry_dt = datetime.fromisoformat(entry_time)
+            if entry_dt.tzinfo is None:
+                entry_dt = _IST.localize(entry_dt)
+        except (ValueError, TypeError):
+            return False
+        now = datetime.now(_IST)
+        if entry_dt.astimezone(_IST).date() < now.date():
+            return True
+        return now.time() >= _EOD_CLOSE_IST
+
+    def close_intraday_eod(self, live_prices: dict, stale_only: bool = False) -> list:
         """
-        Force-close all open intraday positions at EOD.
-        Uses last available live price; falls back to entry_price if quote unavailable.
+        Force-close open intraday positions at EOD.
+        Uses last available live price; positions without a quote stay open.
+
+        stale_only: close only positions whose scheduled 3:20 PM close was missed
+        (app was down when the cron should have fired). Used by startup recovery;
+        the fill is the current quote, not the actual 3:20 price, so these are
+        tagged EOD_CLOSE_LATE for the audit trail.
         """
         positions = self._portfolio.get_open_positions()
         closed = []
         for pos in positions:
             if pos.get("strategy") != "intraday":
+                continue
+            if stale_only and not self._missed_eod_close(pos.get("entry_time")):
                 continue
             symbol = pos["symbol"]
             price = live_prices.get(symbol)
@@ -296,9 +322,10 @@ class PaperBroker(BaseBroker):
                     "Position remains open — manual close required."
                 )
                 continue
-            pnl = self._portfolio.close_position(pos["id"], price, "EOD_CLOSE")
-            closed.append({"symbol": symbol, "reason": "EOD_CLOSE", "pnl": pnl, "exit_price": price})
-            _logger.info(f"EOD auto-close: {symbol} @ ₹{price:.2f} | P&L ₹{pnl:.2f}")
+            reason = "EOD_CLOSE_LATE" if stale_only else "EOD_CLOSE"
+            pnl = self._portfolio.close_position(pos["id"], price, reason)
+            closed.append({"symbol": symbol, "reason": reason, "pnl": pnl, "exit_price": price})
+            _logger.info(f"EOD auto-close ({reason}): {symbol} @ ₹{price:.2f} | P&L ₹{pnl:.2f}")
         return closed
 
     # ── BaseBroker interface ────────────────────────────────────────────────

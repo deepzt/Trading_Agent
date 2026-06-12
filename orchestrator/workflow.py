@@ -428,40 +428,66 @@ class TradingScheduler:
                     f"{emoji} {trade['symbol']} closed: {trade['reason']} | P&L ₹{trade.get('pnl', 0):.2f}"
                 )
 
-    def _run_intraday_eod_close(self):
-        if not is_trading_day():
-            return
+    @staticmethod
+    def _auto_close_eod_enabled() -> bool:
         import yaml
         from pathlib import Path
         cfg_path = Path(__file__).parent.parent / "config" / "trading_config.yaml"
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
-        if not cfg.get("strategies", {}).get("intraday", {}).get("auto_close_eod", True):
-            return
+        return bool(cfg.get("strategies", {}).get("intraday", {}).get("auto_close_eod", True))
 
-        _logger.info("=== INTRADAY EOD CLOSE ===")
-        data_agent = DataAgent()
+    def _close_intraday_positions(self, stale_only: bool = False) -> list:
+        """Fetch quotes for open intraday positions and close them via the broker."""
         portfolio = PortfolioAgent()
-        broker = PaperBroker(portfolio)
-
-        # Fetch live prices for all symbols with open intraday positions
         open_positions = portfolio.get_open_positions()
-        intraday_syms = [p["symbol"] for p in open_positions if p.get("strategy") == "intraday"]
+        intraday_syms = {p["symbol"] for p in open_positions if p.get("strategy") == "intraday"}
+        if not intraday_syms:
+            return []
+
+        data_agent = DataAgent()
         live_prices = {}
         for sym in intraday_syms:
             q = data_agent.get_live_quote(sym)
             if q:
                 live_prices[sym] = q["last_price"]
 
-        closed = broker.close_intraday_eod(live_prices)
+        broker = PaperBroker(portfolio)
+        closed = broker.close_intraday_eod(live_prices, stale_only=stale_only)
         if closed:
             notif = NotificationAgent()
             for trade in closed:
                 emoji = "✅" if (trade.get("pnl") or 0) >= 0 else "❌"
+                label = "EOD Close (missed — closed on restart)" if stale_only else "EOD Close"
                 notif.send_alert(
-                    f"{emoji} EOD Close: {trade['symbol']} @ ₹{trade['exit_price']:.2f} | P&L ₹{trade.get('pnl', 0):.2f}"
+                    f"{emoji} {label}: {trade['symbol']} @ ₹{trade['exit_price']:.2f} | P&L ₹{trade.get('pnl', 0):.2f}"
                 )
             _logger.info(f"EOD closed {len(closed)} intraday position(s)")
+        return closed
+
+    def _run_intraday_eod_close(self):
+        if not is_trading_day():
+            return
+        if not self._auto_close_eod_enabled():
+            return
+        _logger.info("=== INTRADAY EOD CLOSE ===")
+        self._close_intraday_positions()
+
+    def _recover_missed_eod_close(self):
+        """Close intraday positions whose 3:20 PM EOD close never fired.
+
+        The cron job is skipped when the app shuts down before 15:20 IST and
+        restarts after the misfire grace window, leaving intraday positions open
+        overnight. Runs once at startup; deliberately NOT gated on is_trading_day()
+        so a stale Friday position is still closed on a weekend restart."""
+        if not self._auto_close_eod_enabled():
+            return
+        closed = self._close_intraday_positions(stale_only=True)
+        if closed:
+            _logger.warning(
+                f"Startup recovery: closed {len(closed)} intraday position(s) "
+                "left open by a missed EOD-close job"
+            )
 
     def _run_eod_report(self):
         if not is_trading_day():
@@ -498,6 +524,12 @@ class TradingScheduler:
         self._run_workflow()
 
     def start(self):
+        # Recover from an EOD close missed while the app was down — never block startup
+        try:
+            self._recover_missed_eod_close()
+        except Exception as e:
+            _logger.error(f"Startup EOD-close recovery failed: {e}")
+
         # Morning scan at 9:15 AM IST — allow up to 10 min late, never overlap
         self._scheduler.add_job(self._run_morning_scan, "cron",
                                  hour=9, minute=15, day_of_week="mon-fri",
@@ -508,11 +540,13 @@ class TradingScheduler:
                                  hour="9-15", minute="*/15", day_of_week="mon-fri",
                                  max_instances=1, coalesce=True,
                                  misfire_grace_time=None)
-        # Intraday EOD auto-close at 3:20 PM (after last SL/TP check at 3:15)
+        # Intraday EOD auto-close at 3:20 PM (after last SL/TP check at 3:15).
+        # Grace of 1h: a restart shortly after 3:20 still fires the job; anything
+        # later is handled by _recover_missed_eod_close() on the next startup.
         self._scheduler.add_job(self._run_intraday_eod_close, "cron",
                                  hour=15, minute=20, day_of_week="mon-fri",
                                  max_instances=1, coalesce=True,
-                                 misfire_grace_time=300)
+                                 misfire_grace_time=3600)
         # EOD report at 3:45 PM
         self._scheduler.add_job(self._run_eod_report, "cron",
                                  hour=15, minute=45, day_of_week="mon-fri",
