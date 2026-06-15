@@ -34,7 +34,10 @@ _logger = get_logger("Main")
 def run_dashboard():
     dashboard_path = Path(__file__).parent / "dashboard" / "app.py"
     _logger.info("Launching Streamlit dashboard...")
-    subprocess.run([sys.executable, "-m", "streamlit", "run", str(dashboard_path)], check=True)
+    try:
+        subprocess.run([sys.executable, "-m", "streamlit", "run", str(dashboard_path)])
+    except KeyboardInterrupt:
+        pass  # Ctrl+C also reaches the child; let the caller shut down cleanly
 
 
 def run_single_scan():
@@ -145,8 +148,12 @@ def run_all():
     _logger.info("Starting dashboard alongside scheduler — close the browser tab or press Ctrl+C to stop.")
     try:
         run_dashboard()
+    except KeyboardInterrupt:
+        pass
     finally:
+        _logger.info("Shutting down scheduler...")
         scheduler.stop()
+        _logger.info("Stopped cleanly.")
 
 
 def run_scheduler():
@@ -199,4 +206,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        _logger.info("Interrupted — exiting.")
+        sys.exit(0)
