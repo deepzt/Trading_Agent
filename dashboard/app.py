@@ -338,6 +338,20 @@ def render_signal_card(sig: dict):
     cls = "signal-buy" if is_buy else "signal-sell"
     verdict = sig.get("claude_verdict", "")
     verdict_badge = {"APPROVE": "✅ Approved", "REJECT": "❌ Rejected", "SKIP": "⏭ Skipped"}.get(verdict, verdict)
+    # Final pipeline outcome — distinguishes a traded signal from one Claude approved
+    # but a risk/execute gate dropped (otherwise both look "✅ Approved").
+    status = (sig.get("status") or "").upper()
+    reject_reason = sig.get("rejection_reason") or ""
+    _outcome = {
+        "EXECUTED": ("📈 Position opened", "#3fb950"),
+        "REJECTED": ("🚫 Not taken (risk)", "#f85149"),
+        "SKIPPED": ("⚠️ Not taken (execution)", "#d29922"),
+    }.get(status)
+    outcome_badge = (
+        f'<span style="background:{_outcome[1]}22; color:{_outcome[1]}; border:1px solid {_outcome[1]}; '
+        f'border-radius:3px; padding:1px 6px; font-size:0.65rem; font-weight:600; margin-left:6px;">{_outcome[0]}</span>'
+        if _outcome and verdict == "APPROVE" else ""
+    )
     conf = sig.get("confidence", 0)
     bar_color = "#3fb950" if conf >= 7 else ("#e3b341" if conf >= 5 else "#f85149")
     conf_pct = int(conf * 10)
@@ -367,7 +381,7 @@ def render_signal_card(sig: dict):
         <div style="display:flex; justify-content:space-between; align-items:start;">
             <div>
                 <span class="signal-symbol">{'🟢' if is_buy else '🔴'} {sig.get('symbol','')}</span>
-                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{composite_badge}{blackout_badge}
+                <span style="color:#8b949e; font-size:0.75rem; margin-left:8px;">{sig.get('strategy','').title()} · {sig.get('timeframe','')}</span>{composite_badge}{blackout_badge}{outcome_badge}
             </div>
             <span style="color:#8b949e; font-size:0.72rem;">{str(sig.get('timestamp',''))[:19]}</span>
         </div>
@@ -382,6 +396,7 @@ def render_signal_card(sig: dict):
         </div>
         <div class="conf-bar-bg"><div class="conf-bar-fill" style="width:{conf_pct}%; background:{bar_color};"></div></div>
         {f'<div style="color:#8b949e; font-size:0.72rem; margin-top:6px; font-style:italic; line-height:1.5;">🤖 {reasoning}</div>' if reasoning else ''}
+        {f'<div style="color:#d29922; font-size:0.72rem; margin-top:4px; line-height:1.5;">ⓘ {reject_reason}</div>' if reject_reason and verdict == "APPROVE" else ''}
     </div>""", unsafe_allow_html=True)
 
 

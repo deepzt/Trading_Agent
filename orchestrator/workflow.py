@@ -259,15 +259,46 @@ def execute_paper_trades(state: TradingState) -> TradingState:
     max_gap_pct = _tcfg.get("strategies", {}).get("intraday", {}).get("max_entry_gap_pct", 0.02)
     max_position_pct = _rcfg.get("position_sizing", {}).get("max_position_pct", 10.0) / 100
 
-    account_size = float(os.getenv("ACCOUNT_SIZE", "100000"))
+    # Position-count cap is enforced HERE (not in RiskAgent) against positions that
+    # actually open — so a signal that fails to fill never wastes a slot. RiskAgent
+    # over-approves a ranked list; we fill highest-conviction first until the cap is hit.
+    max_pos = _rcfg.get("portfolio_limits", {}).get("max_open_positions", 5)
+    if state.get("regime") == "VOLATILE":
+        vol_cap = _rcfg.get("regime_risk", {}).get("volatile_max_positions", max_pos)
+        if vol_cap < max_pos:
+            _logger.info(f"VOLATILE regime — position cap tightened {max_pos}→{vol_cap}")
+            max_pos = vol_cap
     try:
-        account_size = portfolio.get_available_cash()
+        open_count = len(portfolio.get_open_positions())
     except Exception:
-        pass
+        open_count = 0
+
+    # Concentration cap is measured against EQUITY (consistent with RiskAgent sizing);
+    # a separate affordability check uses free CASH so we never spend money we don't have.
+    try:
+        equity = portfolio.get_performance_stats().get("current_equity", float(os.getenv("ACCOUNT_SIZE", "100000")))
+    except Exception:
+        equity = float(os.getenv("ACCOUNT_SIZE", "100000"))
+    try:
+        available_cash = portfolio.get_available_cash()
+    except Exception:
+        available_cash = equity
+
+    def _skip(signal, reason):
+        signal.status = "SKIPPED"
+        signal.rejection_reason = reason
+        _logger.warning(f"Skipping {signal.symbol}: {reason}")
 
     for trade in state["approved_trades"]:
         signal = trade["signal"]
         qty = trade["quantity"]
+
+        # Capacity gate — only positions that actually fill consume a slot
+        if open_count >= max_pos:
+            signal.status = "REJECTED"
+            signal.rejection_reason = f"Max positions ({max_pos}) reached"
+            _logger.info(f"{signal.symbol}: max positions ({max_pos}) reached — not opened")
+            continue
 
         # Fetch live price to use as actual fill price (signal.entry_price is yesterday's close)
         quote = data_agent.get_live_quote(signal.symbol)
@@ -276,10 +307,7 @@ def execute_paper_trades(state: TradingState) -> TradingState:
             gap = (live_price - signal.entry_price) / signal.entry_price
             # For intraday breakout signals, reject if price has already gapped up too far
             if signal.strategy == "intraday" and gap > max_gap_pct:
-                _logger.warning(
-                    f"Skipping {signal.symbol} intraday — live ₹{live_price:.2f} is "
-                    f"{gap*100:.1f}% above planned entry ₹{signal.entry_price:.2f} (max {max_gap_pct*100:.0f}%)"
-                )
+                _skip(signal, f"Intraday entry gapped {gap*100:.1f}% above plan ₹{signal.entry_price:.2f} (max {max_gap_pct*100:.0f}%)")
                 continue
             # Shift SL and targets by the same delta to preserve ATR-based risk/reward
             price_shift = live_price - signal.entry_price
@@ -289,18 +317,28 @@ def execute_paper_trades(state: TradingState) -> TradingState:
             signal.target_2 = round(signal.target_2 + price_shift, 2)
             signal.recompute_risk()  # keep sl_pct/risk_reward consistent with new levels
 
-            # Re-apply max_position_pct cap against live price (quantity was sized on stale price)
-            max_qty_by_value = int((account_size * max_position_pct) / signal.entry_price)
-            if qty > max_qty_by_value:
-                _logger.info(
-                    f"{signal.symbol}: qty capped {qty}→{max_qty_by_value} after live price update"
-                )
-                qty = max_qty_by_value
-            if qty < 1:
-                _logger.warning(f"Skipping {signal.symbol}: qty=0 after live price cap")
-                continue
+        # Concentration cap (% of equity) — quantity may have been sized on a stale price
+        max_qty_by_value = int((equity * max_position_pct) / signal.entry_price)
+        if qty > max_qty_by_value:
+            _logger.info(f"{signal.symbol}: qty capped {qty}→{max_qty_by_value} (max {max_position_pct*100:.0f}% of equity)")
+            qty = max_qty_by_value
+        # Affordability — can't deploy more than the cash on hand
+        max_qty_by_cash = int(available_cash / signal.entry_price)
+        if qty > max_qty_by_cash:
+            _logger.info(f"{signal.symbol}: qty capped {qty}→{max_qty_by_cash} (available cash ₹{available_cash:,.0f})")
+            qty = max_qty_by_cash
+
+        if qty < 1:
+            if available_cash < signal.entry_price:
+                _skip(signal, f"Insufficient cash ₹{available_cash:,.0f} for 1 share @ ₹{signal.entry_price:,.2f}")
+            else:
+                _skip(signal, f"Position capped below 1 share by {max_position_pct*100:.0f}% concentration limit @ ₹{signal.entry_price:,.2f}")
+            continue
 
         broker.execute_signal(signal, qty)
+        signal.status = "EXECUTED"
+        open_count += 1                              # slot consumed only by an actual fill
+        available_cash -= qty * signal.entry_price  # reserve cash so the next fill sees it spent
 
     state["portfolio_stats"] = portfolio.get_performance_stats()
     return state
@@ -311,8 +349,13 @@ def send_notifications(state: TradingState) -> TradingState:
     agent = NotificationAgent()
     portfolio = PortfolioAgent()
 
+    # Only alert on trades that actually opened a position — a risk/execute gate may
+    # have dropped some approved candidates (status SKIPPED), and alerting those would
+    # imply a position that doesn't exist.
     for trade in state["approved_trades"]:
         signal = trade["signal"]
+        if signal.status != "EXECUTED":
+            continue
         qty = trade["quantity"]
         agent.send_signal_alert(signal, qty)
 

@@ -50,7 +50,8 @@ class Signal:
         self.confidence = round(confidence, 1)
         self.reasons = reasons
         self.timestamp = _now_ist()
-        self.status = "PENDING"              # PENDING → APPROVED / REJECTED / EXECUTED
+        self.status = "PENDING"              # PENDING → APPROVED → EXECUTED / REJECTED / SKIPPED
+        self.rejection_reason = None         # why a risk/execute stage dropped an approved signal
         self.claude_verdict = None
         self.claude_reasoning = None
         self.composite_rating: str = "UNKNOWN"
@@ -84,6 +85,7 @@ class Signal:
             "timeframe": self.timeframe,
             "timestamp": self.timestamp,
             "status": self.status,
+            "rejection_reason": self.rejection_reason,
             "claude_verdict": self.claude_verdict,
             "claude_reasoning": self.claude_reasoning,
             "composite_rating": self.composite_rating,

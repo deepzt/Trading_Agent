@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS signals_log (
     claude_reasoning TEXT,
     timestamp TEXT,
     status TEXT,
+    rejection_reason TEXT,
     composite_rating TEXT,
     entry_price REAL,
     stop_loss REAL,
@@ -102,6 +103,7 @@ class PortfolioAgent(BaseAgent):
                 pass  # Already renamed or doesn't exist
             # Migrate existing DB — add columns that may be absent in older DBs
             _new_cols = [
+                ("rejection_reason", "TEXT"),
                 ("composite_rating", "TEXT"),
                 ("entry_price", "REAL"),
                 ("stop_loss", "REAL"),
@@ -409,10 +411,10 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("""
                 INSERT OR REPLACE INTO signals_log
                     (id, symbol, strategy, signal_type, confidence, claude_verdict,
-                     claude_reasoning, timestamp, status, composite_rating,
+                     claude_reasoning, timestamp, status, rejection_reason, composite_rating,
                      entry_price, stop_loss, target_1, target_2,
                      risk_reward, sl_pct, timeframe)
-                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :tvr,
+                VALUES (:id, :sym, :strat, :stype, :conf, :cv, :cr, :ts, :st, :rj, :tvr,
                         :ep, :sl, :t1, :t2, :rr, :slp, :tf)
             """), {
                 "id": signal_dict.get("id"),
@@ -424,6 +426,7 @@ class PortfolioAgent(BaseAgent):
                 "cr": signal_dict.get("claude_reasoning"),
                 "ts": signal_dict.get("timestamp"),
                 "st": signal_dict.get("status"),
+                "rj": signal_dict.get("rejection_reason"),
                 "tvr": signal_dict.get("composite_rating", "UNKNOWN"),
                 "ep": signal_dict.get("entry_price"),
                 "sl": signal_dict.get("stop_loss"),

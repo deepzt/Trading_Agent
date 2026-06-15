@@ -47,39 +47,35 @@ class RiskAgent(BaseAgent):
 
         if not self._trading_enabled():
             self.log_warning("TRADING_ENABLED=false — all signals blocked")
-            return []
+            return self._reject_all(signals, "Trading disabled (TRADING_ENABLED=false)")
 
         if self._daily_loss_exceeded():
             self.log_warning("Daily loss limit reached (incl. open positions) — blocking all signals")
-            return []
+            return self._reject_all(signals, "Daily loss limit reached")
 
         if self._drawdown_exceeded():
             self.log_warning("Max drawdown exceeded (incl. open positions) — blocking all signals")
-            return []
+            return self._reject_all(signals, "Max drawdown exceeded")
 
         if self._daily_trade_limit_reached():
             self.log_warning("Daily trade limit reached — blocking all signals")
-            return []
+            return self._reject_all(signals, "Daily trade limit reached")
 
         open_positions = self._get_open_position_count()
-        max_pos = self._cfg["portfolio_limits"]["max_open_positions"]
-        # In a VOLATILE regime, tighten the simultaneous-position cap
-        if self._regime == "VOLATILE":
-            vol_cap = self._cfg.get("regime_risk", {}).get("volatile_max_positions", max_pos)
-            if vol_cap < max_pos:
-                self.log_info(f"VOLATILE regime — position cap tightened {max_pos}→{vol_cap}")
-                max_pos = vol_cap
 
+        # NOTE: the max_open_positions cap is intentionally NOT enforced here. A signal
+        # approved in this stage can still fail at execution (gap-up, insufficient cash,
+        # qty→0), which would waste the reserved slot while a lower-ranked candidate sits
+        # rejected for "max positions". Instead we over-approve a ranked list and let
+        # execute_paper_trades fill top-down until the cap is hit on ACTUAL positions.
         approved = []
         approved_symbols: set = set()  # track in-scan approvals — DB not updated until execute step
         self._scan_approved = []       # reset per scan; read by sector/correlation checks
         for signal in signals:
-            if open_positions >= max_pos:
-                self.log_info(f"Max positions ({max_pos}) reached, skipping {signal.symbol}")
-                break
-
             if signal.symbol in approved_symbols:
-                self.log_info(f"REJECTED {signal.symbol}: already approved in this scan", symbol=signal.symbol)
+                reason = "Already approved in this scan"
+                self.log_info(f"REJECTED {signal.symbol}: {reason.lower()}", symbol=signal.symbol)
+                self._mark_rejected(signal, reason)
                 continue
 
             ok, reason = self._check_signal(signal, open_positions, context)
@@ -89,12 +85,31 @@ class RiskAgent(BaseAgent):
                     approved.append((signal, qty))
                     approved_symbols.add(signal.symbol)
                     self._scan_approved.append((signal, qty))
-                    open_positions += 1
                     self.log_info(f"APPROVED {signal.symbol} qty={qty} conf={signal.confidence}", symbol=signal.symbol)
+                else:
+                    reason = "Position size rounded to 0 shares (risk/price too small)"
+                    self.log_info(f"REJECTED {signal.symbol}: {reason}", symbol=signal.symbol)
+                    self._mark_rejected(signal, reason)
             else:
                 self.log_info(f"REJECTED {signal.symbol}: {reason}", symbol=signal.symbol)
+                self._mark_rejected(signal, reason)
 
+        # Highest-conviction first, so execution fills the best signals into open slots
+        approved.sort(key=lambda sq: sq[0].confidence, reverse=True)
         return approved
+
+    @staticmethod
+    def _mark_rejected(signal: Signal, reason: str) -> None:
+        """Flag an approved-by-Claude signal that a risk gate dropped, so the audit
+        log/dashboard show it as not-taken instead of a phantom APPROVED."""
+        signal.status = "REJECTED"
+        signal.rejection_reason = reason
+
+    def _reject_all(self, signals: List[Signal], reason: str) -> List[Tuple[Signal, int]]:
+        """Mark every candidate rejected (account-level block) and approve none."""
+        for s in signals:
+            self._mark_rejected(s, reason)
+        return []
 
     def _check_signal(self, signal: Signal, current_positions: int, context: dict = None) -> Tuple[bool, str]:
         """Returns (approved, rejection_reason)."""
