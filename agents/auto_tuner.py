@@ -26,6 +26,14 @@ class AutoTuner(BaseAgent):
     THRESHOLD_MIN = 5.0
     THRESHOLD_MAX = 8.5
 
+    # MAE-based stop calibration. Stricter than threshold tuning because changing a
+    # stop distance is more consequential: it needs more winners with captured MAE,
+    # moves in small steps, and stays inside hard bounds.
+    STOP_MIN_WINNERS = 8    # Winners with captured MAE before a stop is recalibrated
+    STOP_STEP = 0.25        # Max change to a strategy's ATR multiplier per run
+    STOP_MULT_MIN = 1.0
+    STOP_MULT_MAX = 3.0
+
     def __init__(self):
         super().__init__("AutoTuner")
         _TUNING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -97,9 +105,85 @@ class AutoTuner(BaseAgent):
 
         return actions
 
+    def calibrate_stops(self, trades: List[dict]) -> List[dict]:
+        """Recalibrate per-strategy ATR stop multipliers from captured MAE.
+
+        Reads each closed trade's stored mae_price (no network), groups by strategy,
+        and—once a strategy has enough winners whose MAE separates from losers'—nudges
+        its ATR stop multiplier toward the winners' p90 MAE, step-limited and bounded.
+        Overrides persist in tuning_state.json; SignalAgent reads them when sizing stops.
+        Returns the list of change actions (empty if nothing changed)."""
+        from agents.mae_calibration import (
+            default_stop_mult, net_pnl, mae_atr, recommend_stop_multiplier,
+        )
+        state = self._load_state()
+        overrides = state.setdefault("stop_multiplier_overrides", {})
+        actions: List[dict] = []
+
+        by_strategy: Dict[str, list] = {}
+        for t in trades:
+            if (t.get("status") or "").upper() == "OPEN":
+                continue
+            strat = t.get("strategy")
+            if strat:
+                by_strategy.setdefault(strat, []).append(t)
+
+        for strategy, ts in by_strategy.items():
+            current = float(overrides.get(strategy, default_stop_mult(strategy)))
+            win, loss = [], []
+            for t in ts:
+                m = mae_atr(t, current)
+                if m is None:
+                    continue
+                (win if net_pnl(t) > 0 else loss).append(m)
+
+            target, reason = recommend_stop_multiplier(
+                win, loss, current,
+                min_winners=self.STOP_MIN_WINNERS,
+                mult_min=self.STOP_MULT_MIN, mult_max=self.STOP_MULT_MAX,
+            )
+            if target is None:
+                self.log_info(f"{strategy}: stop not recalibrated — {reason}")
+                continue
+
+            # Move gradually toward the target, then clamp to hard bounds.
+            if target > current:
+                new = round(min(current + self.STOP_STEP, target), 2)
+            else:
+                new = round(max(current - self.STOP_STEP, target), 2)
+            new = round(min(max(new, self.STOP_MULT_MIN), self.STOP_MULT_MAX), 2)
+            if abs(new - current) < 0.01:
+                continue
+
+            overrides[strategy] = new
+            direction = "Widened" if new > current else "Tightened"
+            action_str = f"{direction} {strategy} stop {current}× → {new}×ATR"
+            full_reason = f"{reason}; target {target}× ({len(win)}W/{len(loss)}L)"
+            self.log_info(f"{action_str} | {full_reason}")
+            entry = {
+                "date": datetime.now(_IST).strftime("%Y-%m-%d %H:%M"),
+                "strategy": strategy,
+                "action": action_str,
+                "reason": full_reason,
+                "before": current,
+                "after": new,
+            }
+            state.setdefault("history", []).append(entry)
+            actions.append(entry)
+
+        state["last_updated"] = datetime.now(_IST).isoformat()
+        self._save_state(state)
+        if actions:
+            self.log_info(f"AutoTuner recalibrated {len(actions)} stop(s)")
+        return actions
+
     def get_threshold_overrides(self) -> Dict[str, float]:
         """Return current per-strategy threshold overrides."""
         return self._load_state().get("threshold_overrides", {})
+
+    def get_stop_overrides(self) -> Dict[str, float]:
+        """Return current per-strategy ATR stop-multiplier overrides."""
+        return self._load_state().get("stop_multiplier_overrides", {})
 
     # ── Private ────────────────────────────────────────────────────────────
 

@@ -114,6 +114,20 @@ class SignalAgent(BaseAgent):
             self._risk = yaml.safe_load(f)
         db_url = os.getenv("DATABASE_URL", "sqlite:///data/trading.db")
         self._engine = create_engine(db_url, echo=False)
+        # Per-strategy ATR stop multipliers, auto-calibrated from MAE by the AutoTuner.
+        # Loaded once per scan; falls back to YAML/code defaults when no override exists.
+        self._stop_overrides = {}
+        try:
+            from agents.auto_tuner import AutoTuner
+            self._stop_overrides = AutoTuner().get_stop_overrides()
+        except Exception as e:
+            self.log_warning(f"Could not load stop overrides: {e}")
+
+    def _stop_atr_mult(self, strategy: str) -> float:
+        """Resolve the base ATR stop multiplier for a strategy: MAE-calibrated override
+        if present, else the strategy default (swing from risk_config, intraday/positional fixed)."""
+        from agents.mae_calibration import default_stop_mult
+        return float(self._stop_overrides.get(strategy, default_stop_mult(strategy)))
 
     def run(self, enriched_data: Dict[str, pd.DataFrame], active_strategies: Optional[List[str]] = None,
             composite_ratings: Optional[Dict[str, str]] = None, regime: str = "TRENDING",
@@ -266,7 +280,7 @@ class SignalAgent(BaseAgent):
         atr = row.get("ATRr_14", entry * 0.02)
         score = self._apply_vol_scaling(score, atr, entry, regime)
 
-        atr_mult = self._risk["stop_loss"]["atr_multiplier"]
+        atr_mult = self._stop_atr_mult("swing")
         if regime == "VOLATILE":
             atr_mult = round(atr_mult * 1.33, 2)  # Wider stop in volatile markets
         sl_dist = atr * atr_mult
@@ -344,7 +358,9 @@ class SignalAgent(BaseAgent):
         entry = close
         atr = row.get("ATRr_14", entry * 0.015)
         score = self._apply_vol_scaling(score, atr, entry, regime)
-        atr_mult = 1.33 if regime == "VOLATILE" else 1.0
+        atr_mult = self._stop_atr_mult("intraday")
+        if regime == "VOLATILE":
+            atr_mult = round(atr_mult * 1.33, 2)
         sl_dist = max(atr * atr_mult, (entry - float(row["low"])) * 1.1)
 
         stop_loss = entry - sl_dist
@@ -430,7 +446,7 @@ class SignalAgent(BaseAgent):
         entry = float(row["close"])
         atr = row.get("ATRr_14", entry * 0.025)
         score = self._apply_vol_scaling(score, atr, entry)  # positional: always use normal baseline
-        sl_dist = atr * 2.0  # Wider stop for positional
+        sl_dist = atr * self._stop_atr_mult("positional")  # default 2.0 — wider stop for positional
 
         stop_loss = entry - sl_dist
         target_1 = entry + sl_dist * 1.5

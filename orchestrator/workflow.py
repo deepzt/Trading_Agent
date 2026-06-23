@@ -376,7 +376,22 @@ def run_auto_tune(state: TradingState) -> TradingState:
     strategy_stats = tracker.compute_strategy_stats(df)
     tuner = AutoTuner()
     actions = tuner.run(strategy_stats, state.get("perf_context", ""))
-    state["tuning_actions"] = actions
+
+    # MAE-based stop calibration from live-captured mae_price (fires only once a
+    # strategy has accumulated enough winners with captured MAE).
+    stop_actions = []
+    try:
+        trades = df.to_dict("records") if not df.empty else []
+        stop_actions = tuner.calibrate_stops(trades)
+    except Exception as e:
+        _logger.warning(f"Stop calibration skipped: {e}")
+    if stop_actions:
+        from agents.notification_agent import NotificationAgent
+        notif = NotificationAgent()
+        for a in stop_actions:
+            notif.send_alert(f"🛠 Stop recalibrated: {a['action']} — {a['reason']}")
+
+    state["tuning_actions"] = actions + stop_actions
     return state
 
 

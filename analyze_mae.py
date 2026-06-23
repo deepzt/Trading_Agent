@@ -114,19 +114,15 @@ def _reconstruct_mae(da: DataAgent, t: dict):
 
 
 def _mae_from_stored(t: dict):
-    """(mae_atr, mae_pct) from the live-captured mae_price, needing an ATR estimate.
-    ATR is backed out of the original stop distance: stop = entry ± mult*ATR."""
-    mae_price = t.get("mae_price")
-    if mae_price is None:
-        return None
-    entry = t["entry_price"]
-    adverse = (entry - mae_price) if t["signal_type"] == "BUY" else (mae_price - entry)
-    adverse = max(adverse, 0.0)
+    """(mae_atr, mae_pct) from the live-captured mae_price. Shares the ATR back-out
+    with the live AutoTuner via agents.mae_calibration so both agree."""
+    from agents.mae_calibration import mae_atr
     mult = CURRENT_MULT.get(t["strategy"], 1.5)
-    atr_est = abs(entry - t["stop_loss"]) / mult
-    if atr_est <= 0:
+    m = mae_atr(t, mult)
+    if m is None:
         return None
-    return adverse / atr_est, adverse / entry * 100
+    adverse = abs(t["entry_price"] - t["mae_price"])
+    return m, adverse / t["entry_price"] * 100
 
 
 def _pct(arr, q):
@@ -159,20 +155,18 @@ def _report_group(name: str, rows: list[dict], min_trades: int):
               f"Winners that dipped PAST it (premature-stop candidates): "
               f"{len(stopped)}/{len(winners)}")
 
-    # Recommendation — only when the sample is meaningful AND stops actually separate
-    # winners from losers. Otherwise report the honest 'no signal' conclusion.
-    if len(winners) < min_trades:
-        print(f"  → Sample too small ({len(winners)} winners < {min_trades}); "
-              f"no recommendation. Keep collecting trades.")
-        return
-    reco = _pct(w_mae, 90)
-    if l_mae and np.median(l_mae) <= reco:
-        print(f"  → CAUTION: losers' median MAE ({np.median(l_mae):.2f}×) is within the "
-              f"proposed stop ({reco:.2f}×). Widening keeps winners AND lets losers run — "
-              f"validate on expectancy (₹/trade), not win-rate, before changing.")
+    # Recommendation via the SAME algorithm the live AutoTuner uses, so this offline
+    # report and the self-improvement loop never disagree.
+    from agents.mae_calibration import recommend_stop_multiplier
+    target, reason = recommend_stop_multiplier(
+        w_mae, l_mae, cur if cur else 1.5,
+        min_winners=min_trades, mult_min=1.0, mult_max=3.0)
+    if target is None:
+        print(f"  → No change: {reason}. Optimize on expectancy, not win-rate.")
     else:
-        print(f"  → Candidate stop ≈ {reco:.2f}×ATR (covers 90% of winners' dips, "
-              f"clears of losers). Current {cur if cur else '?'}×.")
+        print(f"  → Candidate stop ≈ {target}×ATR (current {cur if cur else '?'}×) — {reason}. "
+              f"Live AutoTuner steps toward this by {0.25}×/run once it has "
+              f"{min_trades}+ winners with captured MAE.")
 
 
 def main():
