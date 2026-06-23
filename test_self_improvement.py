@@ -84,7 +84,10 @@ def seed_fake_trades():
     ]
 
     for i, (strategy, symbol, win, entry, stop, t1, t2, qty) in enumerate(scenarios):
-        trade_id = str(uuid.uuid4())
+        # Tag every seeded row with a "seed-" id prefix so cleanup can remove them
+        # exactly, without guessing from symbol/exit_reason (a brittle match that
+        # silently failed before and left fake trades polluting the live stats).
+        trade_id = "seed-" + str(uuid.uuid4())
         entry_time = (now - timedelta(days=30 - i)).isoformat()
         exit_time = (now - timedelta(days=29 - i)).isoformat()
         exit_price = t1 if win else stop
@@ -215,9 +218,10 @@ if __name__ == "__main__":
         if _DB_PATH.exists():
             import sqlite3
             conn = sqlite3.connect(_DB_PATH)
-            deleted = conn.execute(
-                "DELETE FROM trades WHERE id IN (SELECT id FROM trades WHERE claude_verdict='APPROVE' AND exit_reason IN ('target_1','stop_loss') AND symbol IN ('TATASTEEL','HDFCBANK','RELIANCE','INFY','TCS','WIPRO'))"
-            ).rowcount
+            # Seeded rows carry a "seed-" id prefix — match on that alone so we can
+            # never delete a real trade, regardless of its symbol or exit_reason.
+            conn.execute("DELETE FROM partial_exits WHERE trade_id LIKE 'seed-%'")
+            deleted = conn.execute("DELETE FROM trades WHERE id LIKE 'seed-%'").rowcount
             conn.commit()
             conn.close()
             console.print(f"[yellow]Removed {deleted} seeded test trades from database[/]")
