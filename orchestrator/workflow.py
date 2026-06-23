@@ -443,7 +443,8 @@ class TradingScheduler:
         broker = PaperBroker(portfolio)
 
         # Fetch prices for all open position symbols (not just watchlist[:20])
-        open_syms = list({p["symbol"] for p in portfolio.get_open_positions()})
+        open_positions = portfolio.get_open_positions()
+        open_syms = list({p["symbol"] for p in open_positions})
         live_prices = {}
         day_highs = {}
         day_lows = {}
@@ -453,6 +454,13 @@ class TradingScheduler:
                 live_prices[sym] = q["last_price"]
                 day_highs[sym] = q["day_high"]
                 day_lows[sym] = q["day_low"]
+
+        # Record Maximum Adverse Excursion before checking exits, so a trade that gets
+        # stopped this tick still has its worst price captured for stop calibration.
+        for p in open_positions:
+            sym = p["symbol"]
+            if sym in day_lows:
+                portfolio.record_mae(p["id"], day_lows[sym], day_highs[sym])
 
         # Fetch TA data for open position symbols only (for T1 reversal detection)
         ta_data = {}

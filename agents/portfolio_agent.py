@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_time TEXT,
     exit_reason TEXT,
     confidence REAL,
-    claude_verdict TEXT
+    claude_verdict TEXT,
+    mae_price REAL
 );
 
 CREATE TABLE IF NOT EXISTS signals_log (
@@ -124,6 +125,7 @@ class PortfolioAgent(BaseAgent):
                 ("t1_booked", "INTEGER DEFAULT 0"),
                 ("t2_booked", "INTEGER DEFAULT 0"),
                 ("realized_pnl", "REAL DEFAULT 0"),
+                ("mae_price", "REAL"),
             ]
             for col, col_type in _trade_cols:
                 try:
@@ -149,9 +151,9 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("""
                 INSERT INTO trades (id, symbol, signal_type, strategy, entry_price, stop_loss,
                     target_1, target_2, quantity, original_quantity, t1_booked, t2_booked,
-                    realized_pnl, status, entry_time, confidence, claude_verdict)
+                    realized_pnl, status, entry_time, confidence, claude_verdict, mae_price)
                 VALUES (:id, :sym, :stype, :strat, :ep, :sl, :t1, :t2, :qty, :qty, 0, 0,
-                    0, 'OPEN', :et, :conf, :cv)
+                    0, 'OPEN', :et, :conf, :cv, :ep)
             """), {
                 "id": trade_id, "sym": symbol, "stype": signal_type, "strat": strategy,
                 "ep": entry_price, "sl": stop_loss, "t1": target_1, "t2": target_2,
@@ -273,6 +275,30 @@ class PortfolioAgent(BaseAgent):
             conn.execute(text("UPDATE trades SET stop_loss=:sl WHERE id=:id"),
                          {"sl": new_sl, "id": trade_id})
             conn.commit()
+
+    def record_mae(self, trade_id: str, day_low: float, day_high: float):
+        """Track the worst adverse price an OPEN trade has reached (Maximum Adverse
+        Excursion). For a BUY the adverse direction is down (track the lowest low);
+        for a SELL it is up (track the highest high). Used later to calibrate stop
+        distances from how far trades actually move against entry. mae_price is
+        seeded to entry on open, so it only ever moves further into adverse territory."""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT signal_type, entry_price, mae_price FROM trades "
+                     "WHERE id=:id AND status='OPEN'"),
+                {"id": trade_id},
+            ).fetchone()
+            if not row:
+                return
+            current = row.mae_price if row.mae_price is not None else row.entry_price
+            if row.signal_type == "BUY":
+                new_mae = min(current, day_low)
+            else:
+                new_mae = max(current, day_high)
+            if new_mae != current:
+                conn.execute(text("UPDATE trades SET mae_price=:m WHERE id=:id"),
+                             {"m": new_mae, "id": trade_id})
+                conn.commit()
 
     # ── Position queries ───────────────────────────────────────────────────
 
