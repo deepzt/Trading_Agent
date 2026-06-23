@@ -111,7 +111,9 @@ class ClaudeValidationAgent(BaseAgent):
             if signal.confidence < threshold:
                 signal.status = "REJECTED"
                 signal.claude_verdict = "SKIP"
-                signal.claude_reasoning = f"Confidence {signal.confidence} below threshold {threshold}"
+                reason = f"Confidence {signal.confidence} below {signal.strategy} threshold {threshold}"
+                signal.claude_reasoning = reason
+                signal.rejection_reason = reason
                 validated.append(signal)
                 continue
 
@@ -146,6 +148,14 @@ class ClaudeValidationAgent(BaseAgent):
                     signal.status = "APPROVED"
                 else:
                     signal.status = "REJECTED"
+                    if signal.claude_verdict == "MODIFY":
+                        # passed Claude with edits but fell below the trade floor
+                        signal.rejection_reason = (
+                            f"Claude MODIFY but confidence {signal.confidence} "
+                            f"< trade threshold {self._modify_approval_threshold}"
+                        )
+                    else:
+                        signal.rejection_reason = f"Claude verdict: {signal.claude_verdict}"
 
                 # SL/T2 may have changed — refresh sl_pct/risk_reward so the risk
                 # gates (max_loss_pct, min RR) never evaluate stale values.
@@ -154,6 +164,7 @@ class ClaudeValidationAgent(BaseAgent):
                 signal.claude_verdict = "SKIP"
                 signal.claude_reasoning = "AI API unavailable — signal held for safety"
                 signal.status = "REJECTED"
+                signal.rejection_reason = "AI API unavailable — signal held for safety"
 
             validated.append(signal)
             self.log_info(

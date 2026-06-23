@@ -396,7 +396,7 @@ def render_signal_card(sig: dict):
         </div>
         <div class="conf-bar-bg"><div class="conf-bar-fill" style="width:{conf_pct}%; background:{bar_color};"></div></div>
         {f'<div style="color:#8b949e; font-size:0.72rem; margin-top:6px; font-style:italic; line-height:1.5;">🤖 {reasoning}</div>' if reasoning else ''}
-        {f'<div style="color:#d29922; font-size:0.72rem; margin-top:4px; line-height:1.5;">ⓘ {reject_reason}</div>' if reject_reason and verdict == "APPROVE" else ''}
+        {f'<div style="color:#d29922; font-size:0.72rem; margin-top:4px; line-height:1.5;">ⓘ {reject_reason}</div>' if reject_reason and reject_reason != reasoning else ''}
     </div>""", unsafe_allow_html=True)
 
 
