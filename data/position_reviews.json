@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-11-13T10:22:13.201380+05:30",
+  "closed_trades": 0,
+  "auto_exit_active": false,
+  "auto_exit_min_confidence": 8.0,
+  "min_closed_trades_for_auto_exit": 10,
+  "auto_closed": 0,
+  "reviews": []
+}

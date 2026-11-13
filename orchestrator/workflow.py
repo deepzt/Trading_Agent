@@ -19,6 +19,7 @@ from agents.earnings_calendar_agent import EarningsCalendarAgent
 from agents.fno_calendar_agent import FnOCalendarAgent
 from agents.notification_agent import NotificationAgent
 from agents.portfolio_agent import PortfolioAgent
+from agents.position_review_agent import PositionReviewAgent
 from agents.regime_detector import RegimeDetector
 from agents.risk_agent import RiskAgent
 from agents.sentiment_agent import SentimentAgent
@@ -540,6 +541,44 @@ class TradingScheduler:
         _logger.info("=== INTRADAY EOD CLOSE ===")
         self._close_intraday_positions()
 
+    def _run_position_review(self):
+        """Daily EOD conviction review of open holdings — flags / auto-exits stale
+        positions the mechanical SL/TP path leaves untouched. Runs after the 3:20 PM
+        intraday close so any already-closed positions are gone before we review."""
+        if not is_trading_day():
+            return
+        _logger.info("=== POSITION REVIEW ===")
+        try:
+            agent = PositionReviewAgent()
+        except Exception as e:
+            _logger.error(f"Position review init failed: {e}")
+            return
+        if not agent.enabled:
+            return
+
+        result = agent.run()
+        reviews = result.get("reviews", [])
+        if not reviews:
+            return
+
+        notif = NotificationAgent()
+        for r in reviews:
+            action = r.get("action")
+            if action == "AUTO_EXITED":
+                emoji = "✅" if (r.get("realized_pnl") or 0) >= 0 else "❌"
+                notif.send_alert(
+                    f"{emoji} Auto-exit (stale): {r['symbol']} closed | "
+                    f"P&L ₹{(r.get('realized_pnl') or 0):.2f} | conviction {r['exit_conviction']}/10\n"
+                    f"{'; '.join(r.get('reasons', [])) or r.get('claude_reasoning', '')}"
+                )
+            elif action in ("RECOMMEND_EXIT", "RECOMMEND_TRIM"):
+                verb = "EXIT" if action == "RECOMMEND_EXIT" else "TRIM"
+                notif.send_alert(
+                    f"⚠️ Review suggests {verb}: {r['symbol']} ({r['strategy']}) | "
+                    f"conviction {r['exit_conviction']}/10\n"
+                    f"{'; '.join(r.get('reasons', [])) or r.get('claude_reasoning', '')}"
+                )
+
     def _recover_missed_eod_close(self):
         """Close intraday positions whose 3:20 PM EOD close never fired.
 
@@ -614,6 +653,11 @@ class TradingScheduler:
                                  hour=15, minute=20, day_of_week="mon-fri",
                                  max_instances=1, coalesce=True,
                                  misfire_grace_time=3600)
+        # Position review at 3:30 PM — after the 3:20 intraday close, before the 3:45 report
+        self._scheduler.add_job(self._run_position_review, "cron",
+                                 hour=15, minute=30, day_of_week="mon-fri",
+                                 max_instances=1, coalesce=True,
+                                 misfire_grace_time=600)
         # EOD report at 3:45 PM
         self._scheduler.add_job(self._run_eod_report, "cron",
                                  hour=15, minute=45, day_of_week="mon-fri",

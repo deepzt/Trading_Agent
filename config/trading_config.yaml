@@ -86,6 +86,16 @@ volatility_scaling:
   baseline_atr_pct: 1.5             # Nifty50 average daily ATR as % of price (~1.5%)
   # Scores scaled by min(baseline / current_atr_pct, 1.0) — never boosts, only penalises high-vol
 
+position_review:                    # Daily EOD conviction review of OPEN holdings (PositionReviewAgent)
+  enabled: true
+  run_eod: true                     # Run at ~3:30 PM IST after the intraday EOD close
+  auto_exit: true                   # Auto-close clear EXIT cases; everything else is recommend-only
+  auto_exit_min_confidence: 8.0     # exit_conviction (0-10) required before an auto-close fires
+  min_closed_trades_for_auto_exit: 10  # Need >=10 closed trades before auto-acting (immature stats → recommend only)
+  borderline_band: 1.5              # Within this many points below the gate → escalate to the LLM tie-break
+  min_hold_bars_before_review: 2    # Don't review positions newer than N calendar days
+  use_claude_on_borderline: true    # Use Claude/GPT only for borderline cases (cost control)
+
 data:
   primary_source: "yfinance"        # "yfinance" or "jugaad"
   fallback_source: "yfinance"

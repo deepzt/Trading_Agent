@@ -1,0 +1,50 @@
+{
+  "threshold_overrides": {
+    "positional": 8.5
+  },
+  "ai_context": "Strategy performance \u2014 intraday: 62.5% WR (8 trades, avg 1.27R). positional: 25.0% WR (12 trades, avg 0.89R). swing: 50.0% WR (6 trades, avg 0.85R). Symbol notes \u2014 TATACONSUM: 4/4 wins (100.0% \u2014 strong).",
+  "history": [
+    {
+      "date": "2026-09-30 09:43",
+      "strategy": "positional",
+      "action": "Raised positional threshold 6.0 \u2192 6.5",
+      "reason": "Negative expectancy \u20b9-212.88/trade (WR 20.0%, 0.89R avg, 10 trades)",
+      "before": 6.0,
+      "after": 6.5
+    },
+    {
+      "date": "2026-10-01 09:16",
+      "strategy": "positional",
+      "action": "Raised positional threshold 6.5 \u2192 7.0",
+      "reason": "Negative expectancy \u20b9-160.24/trade (WR 25.0%, 0.89R avg, 12 trades)",
+      "before": 6.5,
+      "after": 7.0
+    },
+    {
+      "date": "2026-10-06 09:16",
+      "strategy": "positional",
+      "action": "Raised positional threshold 7.0 \u2192 7.5",
+      "reason": "Negative expectancy \u20b9-160.24/trade (WR 25.0%, 0.89R avg, 12 trades)",
+      "before": 7.0,
+      "after": 7.5
+    },
+    {
+      "date": "2026-10-07 09:22",
+      "strategy": "positional",
+      "action": "Raised positional threshold 7.5 \u2192 8.0",
+      "reason": "Negative expectancy \u20b9-160.24/trade (WR 25.0%, 0.89R avg, 12 trades)",
+      "before": 7.5,
+      "after": 8.0
+    },
+    {
+      "date": "2026-11-12 10:41",
+      "strategy": "positional",
+      "action": "Raised positional threshold 8.0 \u2192 8.5",
+      "reason": "Negative expectancy \u20b9-160.24/trade (WR 25.0%, 0.89R avg, 12 trades)",
+      "before": 8.0,
+      "after": 8.5
+    }
+  ],
+  "last_updated": "2026-11-13T10:07:06.511657+05:30",
+  "stop_multiplier_overrides": {}
+}

@@ -5,6 +5,7 @@ Run with: streamlit run dashboard/app.py
 
 import sys
 import os
+import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dotenv import load_dotenv
@@ -991,6 +992,57 @@ with tabs[1]:
         else:
             st.info("No open positions.")
 
+        # ── Position Review — staleness / conviction-decay verdicts ──────────
+        st.markdown("#### 🩺 Position Review")
+        _review_path = Path(__file__).parent.parent / "data" / "position_reviews.json"
+        rcol1, rcol2 = st.columns([3, 1])
+        with rcol2:
+            if st.button("Run review now", use_container_width=True):
+                try:
+                    from agents.position_review_agent import PositionReviewAgent
+                    PositionReviewAgent().run(dry_run=True)  # preview only — never auto-closes from UI
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Review failed: {e}")
+        if _review_path.exists():
+            try:
+                with open(_review_path) as _f:
+                    _rev = json.load(_f)
+            except Exception:
+                _rev = None
+            if _rev and _rev.get("reviews"):
+                _ts = _rev.get("timestamp", "")[:19].replace("T", " ")
+                _auto = "ON" if _rev.get("auto_exit_active") else "OFF (recommend-only)"
+                with rcol1:
+                    st.caption(
+                        f"Last reviewed {_ts} · auto-exit **{_auto}** · "
+                        f"gate ≥{_rev.get('auto_exit_min_confidence')}/10 · "
+                        f"{_rev.get('closed_trades', 0)} closed trades "
+                        f"(need {_rev.get('min_closed_trades_for_auto_exit')} to auto-act)"
+                    )
+                _badge = {"EXIT": "🔴 EXIT", "TRIM": "🟠 TRIM", "HOLD": "🟢 HOLD"}
+                _act = {"AUTO_EXITED": "✅ auto-closed", "RECOMMEND_EXIT": "⚠️ recommend exit",
+                        "RECOMMEND_TRIM": "⚠️ recommend trim", "HOLD": "—"}
+                _rev_rows = []
+                for r in _rev["reviews"]:
+                    _rev_rows.append({
+                        "Symbol": r["symbol"],
+                        "Strategy": r["strategy"],
+                        "Verdict": _badge.get(r["verdict"], r["verdict"]),
+                        "Conviction": f"{r['exit_conviction']}/10",
+                        "Held": f"{r['bars_held']}/{r['max_days'] or '—'}d",
+                        "→T1": f"{r['t1_progress_pct']}%" if r.get("t1_progress_pct") is not None else "—",
+                        "Unreal": f"{r['unrealized_pct']:+.1f}%" if r.get("unrealized_pct") is not None else "—",
+                        "TA": f"{r['composite_score']}" if r.get("composite_score") is not None else "—",
+                        "Action": _act.get(r.get("action"), r.get("action") or "—"),
+                        "Why": ("; ".join(r.get("reasons", [])) or r.get("claude_reasoning", ""))[:120],
+                    })
+                st.dataframe(pd.DataFrame(_rev_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No review verdicts yet — runs daily at 3:30 PM IST, or click **Run review now**.")
+        else:
+            st.info("No review verdicts yet — runs daily at 3:30 PM IST, or click **Run review now**.")
+
         # Recent trades table
         st.markdown("#### Recent Trades")
         display = history.head(30).copy()
@@ -1253,7 +1305,7 @@ with tabs[5]:
         st.error(f"Could not load watchlist config: {e}")
         st.stop()
 
-    wl_group = st.radio("Group", ["nifty100", "nifty50", "nifty_next50", "midcap_focus"], horizontal=True)
+    wl_group = st.radio("Group", ["nifty200", "nifty100", "nifty50", "nifty_next50", "midcap_focus"], horizontal=True)
     symbols_list = watchlist.get(wl_group, [])
 
     col_load, col_n = st.columns([1, 3])

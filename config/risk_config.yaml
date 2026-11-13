@@ -20,7 +20,7 @@ position_sizing:
   conviction_max_multiplier: 1.25   # up to 1.25× base risk at max confidence
 
 portfolio_limits:
-  max_open_positions: 5             # Max simultaneous trades
+  max_open_positions: 8             # Max simultaneous trades
   max_sector_exposure_pct: 30.0     # Max 30% in one sector
   max_intraday_positions: 3         # Max intraday positions at once
   max_correlation: 0.7              # Reject a signal correlated above this to a holding

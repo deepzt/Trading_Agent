@@ -75,6 +75,26 @@ class CompositeTAAgent(BaseAgent):
         self.log_info(f"CompositeTA: scored {len(ratings)} symbols, {bullish} bullish")
         return ratings
 
+    def score(self, enriched_data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
+        """Numeric form of run(): {symbol: composite score 0-10} (None if unscorable).
+
+        Used by PositionReviewAgent to measure momentum decay on open holdings —
+        the label loses the granularity needed to tell "barely BUY" from "STRONG_BUY".
+        """
+        out: Dict[str, float] = {}
+        for symbol, df in enriched_data.items():
+            if df is None or df.empty:
+                out[symbol] = None
+                continue
+            try:
+                raw = self._score_row(df.iloc[-1])
+                norm = max(0.0, min(10.0, (raw + _MAX_RAW) / _RANGE * 10.0))
+                out[symbol] = round(norm, 2)
+            except Exception as e:
+                self.log_warning(f"{symbol}: composite numeric score failed — {e}")
+                out[symbol] = None
+        return out
+
     def _score_row(self, row: pd.Series) -> float:
         raw = 0.0
 
